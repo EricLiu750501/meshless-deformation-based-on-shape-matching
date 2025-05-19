@@ -57,6 +57,8 @@ let objListFolder:GUI
 const animation = { enabled: true, play: false }
 const loader = new OBJLoader();
 const dragableObject: Object3D[] = [] ;
+const vertexMarkers: Mesh[] = [];
+
 
 loader.load(
 	// resource URL
@@ -196,7 +198,6 @@ function init() {
       material.emissive.set('black')
     })
     dragControls.addEventListener('dragstart', (event) => {
-      console.log('dragstart:', event.object.name)
       const mesh = event.object as Mesh
       const material = mesh.material as MeshStandardMaterial
       cameraControls.enabled = false
@@ -204,8 +205,11 @@ function init() {
       material.emissive.set('orange')
       material.opacity = 0.7
       material.needsUpdate = true
+
+      showVertices(event.object)
     })
     dragControls.addEventListener('dragend', (event) => {
+
       cameraControls.enabled = true
       animation.play = true
       const mesh = event.object as Mesh
@@ -213,9 +217,12 @@ function init() {
       material.emissive.set('black')
       material.opacity = 1
       material.needsUpdate = true
+
+      hideVertexMarkers()
     })
     dragControls.addEventListener('drag', (event) => {
       console.log('dragging:', event.object.name)
+      updateVertexMarkers(event.object)
     })
     dragControls.enabled = true
     
@@ -358,6 +365,51 @@ function animate() {
   stats.end()
 }
 
+// Helper function to show vertices of an object
+function showVertices(object: Object3D) {
+  // Clear any existing markers
+  hideVertexMarkers();
+  
+  // Get vertices from the object
+  const vertices = getVerticesFromObject(object);
+  
+  // Create a marker for each vertex
+  const markerGeometry = new BoxGeometry(0.05, 0.05, 0.05);
+  const markerMaterial = new MeshBasicMaterial({ color: 'red' });
+  
+  vertices.forEach(vertex => {
+    // Apply object's world matrix to transform the vertex
+    const worldVertex = vertex.clone();
+    worldVertex.applyMatrix4(object.matrixWorld);
+    
+    const marker = new Mesh(markerGeometry, markerMaterial);
+    marker.position.copy(worldVertex);
+    scene.add(marker);
+    vertexMarkers.push(marker);
+  });
+}
+
+// Helper function to update vertex marker positions
+function updateVertexMarkers(object: Object3D) {
+  // Get current vertices
+  const vertices = getVerticesFromObject(object);
+  
+  // Update marker positions
+  for (let i = 0; i < vertices.length && i < vertexMarkers.length; i++) {
+    // Apply object's world matrix to transform the vertex
+    const worldVertex = vertices[i].clone();
+    worldVertex.applyMatrix4(object.matrixWorld);
+    vertexMarkers[i].position.copy(worldVertex);
+  }
+}
+
+// Helper function to hide vertex markers
+function hideVertexMarkers() {
+  vertexMarkers.forEach(marker => {
+    scene.remove(marker);
+  });
+  vertexMarkers.length = 0;
+}
 
 
 export {
