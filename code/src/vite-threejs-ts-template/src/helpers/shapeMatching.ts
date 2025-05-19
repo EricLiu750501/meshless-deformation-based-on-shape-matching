@@ -94,39 +94,87 @@ function calculateA_pq(p:Vector3[], q:Vector3[], masses:number[]):Matrix3 {
 
 }
 
+function addMatrix3(a: Matrix3, b: Matrix3): Matrix3 {
+  const ae = a.elements;
+  const be = b.elements;
+  const result = new Matrix3();
+  const re = result.elements;
+
+  for (let i = 0; i < 9; i++) {
+    re[i] = ae[i] + be[i];
+  }
+
+  return result;
+}
+
 
 /**
  * 從 Apq 做極分解，取得旋轉 R
  */
 function extractRotation(Apq: Matrix3): Matrix3 {
-  // A^T * A
-  const AtA = Apq.clone().transpose().multiply(Apq);
-  
-  // S = sqrt(AtA)，要用 SVD 或 Eigen decomposition
-  // 這裡簡化：若用 Three.js 沒有直接的方法，需要自己實作
-  // 先假設 AtA 是對稱的，可以用近似方法
-  const S = AtA.clone(); // <- TODO:這裡應該要做平方根，可以找庫支援
-  
-  // R = Apq * S^-1
-  const Sinv = S.clone().invert();
-  const R = Apq.clone().multiply(Sinv);
-  
+  let R = Apq.clone();
+  const tmp = new Matrix3();
+  const RT = new Matrix3();
+
+  const maxIterations = 10;
+  for (let i = 0; i < maxIterations; i++) {
+    RT.copy(R).transpose();
+    tmp.copy(R).invert().transpose(); // approximate inverse transpose
+
+    R = addMatrix3(R, tmp).multiplyScalar(0.5);
+  }
+
   return R;
 }
 
-function root() {}
 
-function shapeMatching(object: Object3D, targetVertices: Vector3[]) {
-    const originalVertices = getVerticesFromObject(object);
-    const originalCentroid = calculateCentroid(originalVertices);
-    const targetCentroid = calculateCentroid(targetVertices);
-    if (originalVertices.length != targetVertices.length) {
-        throw new Error("Initial and target shapes must have the same number of vertices.");
+function shapeMatching(object: Object3D, targetVertices: Vector3[], masses: number[]) {
+    // console.group("shapeMatching");
+    // console.log("object", object);
+    // console.log("targetVertices", targetVertices);
+  const currentVertices = getVerticesFromObject(object);
+  const numPoints = currentVertices.length;
+
+  if (targetVertices.length !== numPoints || masses.length !== numPoints) {
+    throw new Error("Vertex count mismatch");
+  }
+
+  // Step 1: Compute centroids
+  const currentCentroid = calculateCentroid(currentVertices);
+  const targetCentroid = calculateCentroid(targetVertices);
+
+  // Step 2: Compute relative positions
+  const p = calculateRelatedPosition(currentVertices, currentCentroid);
+  const q = calculateRelatedPosition(targetVertices, targetCentroid);
+
+  // Step 3: Compute A_pq
+  const A_pq = calculateA_pq(p, q, masses);
+
+  // Step 4: Extract rotation
+  const R = extractRotation(A_pq);
+
+  // Step 5: Apply transformation to original (target) shape
+  const newVertices:Vector3[] = [];
+  for (let i = 0; i < numPoints; i++) {
+    const rotated = q[i].clone().applyMatrix3(R);
+    const newPos = rotated.add(currentCentroid);
+    newVertices.push(newPos);
+  }
+
+  // Step 6: 將新頂點位置寫入 geometry
+  object.traverse((child) => {
+    if (child instanceof Mesh) {
+      const geometry = child.geometry;
+      if (geometry instanceof BufferGeometry) {
+        const positionAttr = geometry.attributes.position;
+        for (let i = 0; i < newVertices.length; i++) {
+          const v = newVertices[i];
+          positionAttr.setXYZ(i, v.x, v.y, v.z);
+        }
+        positionAttr.needsUpdate = true;
+      }
     }
-    // console.log(vertices);
-    // console.log(targetVertices);
-    // 這裡可以進行形狀匹配的邏輯
-    // 例如，計算頂點之間的距離，或使用其他算法來比較形狀
+  });
 }
 
 

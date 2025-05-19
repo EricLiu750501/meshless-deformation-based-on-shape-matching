@@ -18,9 +18,9 @@ import {
   WebGLRenderer,
   MeshBasicMaterial,
   DoubleSide,
-  TextureLoader,
   RepeatWrapping,
-  Object3D
+  Object3D,
+  Vector3
 
 } from 'three'
 import { DragControls } from 'three/addons/controls/DragControls.js'
@@ -32,7 +32,7 @@ import { resizeRendererToDisplaySize } from './helpers/responsiveness'
 import { createGridTexture } from './helpers/plane'
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import './style.css'
-import {getVerticesFromObject} from './helpers/shapeMatching'
+import {getVerticesFromObject, shapeMatching} from './helpers/shapeMatching'
 
 const CANVAS_ID = 'scene'
 
@@ -58,33 +58,36 @@ const animation = { enabled: true, play: false }
 const loader = new OBJLoader();
 const dragableObject: Object3D[] = [] ;
 const vertexMarkers: Mesh[] = [];
+const initialVertices: Map<Object3D, Vector3[]> = new Map();
+const initialMasses: Map<Object3D, number[]> = new Map();
 
 
-loader.load(
-	// resource URL
-	'teapot.obj',
-	// called when resource is loaded
-	function ( object ) {
-    object.scale.set(0.01, 0.01, 0.01);
-    console.log(getVerticesFromObject(object));
-		scene.add( object );
-		dragableObject.push(object);
 
-
-	},
-	// called when loading is in progress
-	function ( xhr ) {
-
-		console.log( ( xhr.loaded / xhr.total * 100 ) + '% loaded' );
-
-	},
-	// called when loading has errors
-	function ( error ) {
-
-		console.log( 'An error happened', error );
-
-	}
-);
+// loader.load(
+// 	// resource URL
+// 	'teapot.obj',
+// 	// called when resource is loaded
+// 	function ( object ) {
+//     object.scale.set(0.01, 0.01, 0.01);
+//     console.log(getVerticesFromObject(object));
+// 		scene.add( object );
+// 		dragableObject.push(object);
+//
+//
+// 	},
+// 	// called when loading is in progress
+// 	function ( xhr ) {
+//
+// 		console.log( ( xhr.loaded / xhr.total * 100 ) + '% loaded' );
+//
+// 	},
+// 	// called when loading has errors
+// 	function ( error ) {
+//
+// 		console.log( 'An error happened', error );
+//
+// 	}
+// );
 
 
 init()
@@ -148,6 +151,12 @@ function init() {
     console.log(getVerticesFromObject(cube))
     cube.castShadow = true
     cube.position.y = 0.5
+
+    
+    // Store initial vertices and masses for the cube
+    const cubeVertices = getVerticesFromObject(cube);
+    initialVertices.set(cube, cubeVertices.map(v => v.clone()));
+    initialMasses.set(cube, cubeVertices.map(() => 1)); // Each vertex has mass 1
 
     const gridTexture = createGridTexture()
     gridTexture.wrapS = RepeatWrapping
@@ -221,8 +230,29 @@ function init() {
       hideVertexMarkers()
     })
     dragControls.addEventListener('drag', (event) => {
-      console.log('dragging:', event.object.name)
-      updateVertexMarkers(event.object)
+      // console.log('dragging:', event.object);
+      updateVertexMarkers(event.object);
+      
+      // Apply shape matching during drag
+      // Get the current vertices (moved by drag controls)
+      const currentVertices = getVerticesFromObject(event.object);
+      
+      // Get the initial vertices and masses
+      const initialVerts = initialVertices.get(event.object);
+      const masses = initialMasses.get(event.object);
+
+      console.log('initialVerts', initialVerts);
+      console.log('masses', masses);
+      console.log('currentVertices', currentVertices);
+      
+      // Apply shape matching if we have the needed data
+      if (initialVerts && masses) {
+        // We apply to the object's local vertices
+        shapeMatching(event.object, initialVerts, masses);
+        
+        // Update vertex markers after shape matching
+        updateVertexMarkers(event.object);
+      }
     })
     dragControls.enabled = true
     
