@@ -114,7 +114,7 @@ function extractRotation(Apq: Matrix3): Matrix3 {
   return R;
 }
 
-function root()
+function root() {}
 
 function shapeMatching(object: Object3D, targetVertices: Vector3[]) {
     const originalVertices = getVerticesFromObject(object);

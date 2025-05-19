@@ -56,6 +56,7 @@ let objListFolder:GUI
 
 const animation = { enabled: true, play: false }
 const loader = new OBJLoader();
+const dragableObject: Object3D[] = [] ;
 
 loader.load(
 	// resource URL
@@ -65,6 +66,7 @@ loader.load(
     object.scale.set(0.01, 0.01, 0.01);
     console.log(getVerticesFromObject(object));
 		scene.add( object );
+		dragableObject.push(object);
 
 
 	},
@@ -164,6 +166,8 @@ function init() {
     scene.add(cube)
     scene.add(plane)
 
+    dragableObject.push(cube)
+
   }
 
   // ===== 🎥 CAMERA =====
@@ -180,7 +184,7 @@ function init() {
     cameraControls.autoRotate = false
     cameraControls.update()
 
-    dragControls = new DragControls([cube], camera, renderer.domElement)
+    dragControls = new DragControls(dragableObject, camera, renderer.domElement)
     dragControls.addEventListener('hoveron', (event) => {
       const mesh = event.object as Mesh
       const material = mesh.material as MeshStandardMaterial
@@ -192,6 +196,7 @@ function init() {
       material.emissive.set('black')
     })
     dragControls.addEventListener('dragstart', (event) => {
+      console.log('dragstart:', event.object.name)
       const mesh = event.object as Mesh
       const material = mesh.material as MeshStandardMaterial
       cameraControls.enabled = false
@@ -209,7 +214,23 @@ function init() {
       material.opacity = 1
       material.needsUpdate = true
     })
-    dragControls.enabled = false
+    dragControls.addEventListener('drag', (event) => {
+      console.log('dragging:', event.object.name)
+    })
+    dragControls.enabled = true
+    
+    // Add a hint for users
+    const hintElement = document.createElement('div')
+    hintElement.innerHTML = 'Click and drag the cube to move it (not Chrome Browser may not work)'
+    hintElement.style.position = 'absolute'
+    hintElement.style.bottom = '10px'
+    hintElement.style.left = '10px'
+    hintElement.style.color = 'white'
+    hintElement.style.padding = '5px'
+    hintElement.style.backgroundColor = 'rgba(0,0,0,0.5)'
+    hintElement.style.borderRadius = '5px'
+    document.body.appendChild(hintElement)
+    // setTimeout(() => hintElement.style.display = 'none', 5000)
 
     // Full screen
     window.addEventListener('dblclick', (event) => {
@@ -278,7 +299,7 @@ function init() {
     cubeOneFolder.add(animation, 'enabled').name('animated')
 
     const controlsFolder = gui.addFolder('Controls')
-    controlsFolder.add(dragControls, 'enabled').name('drag controls')
+    controlsFolder.add(dragControls, 'enabled').name('drag controls').setValue(true)
 
     const lightsFolder = gui.addFolder('Lights')
     lightsFolder.add(pointLight, 'visible').name('point light')
