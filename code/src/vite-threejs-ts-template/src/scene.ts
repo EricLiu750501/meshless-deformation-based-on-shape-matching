@@ -20,7 +20,11 @@ import {
   DoubleSide,
   RepeatWrapping,
   Object3D,
-  Vector3
+  Vector3,
+  BufferGeometry,
+  MeshNormalMaterial,
+  BufferAttribute,
+
 
 } from 'three'
 import { DragControls } from 'three/addons/controls/DragControls.js'
@@ -32,7 +36,7 @@ import { resizeRendererToDisplaySize } from './helpers/responsiveness'
 import { createGridTexture } from './helpers/plane'
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import './style.css'
-import {getVerticesFromObject, shapeMatching} from './helpers/shapeMatching'
+import {getVerticesFromObject, shapeMatching, getWorldVertices, getAllWorldVertices} from './helpers/shapeMatching'
 
 const CANVAS_ID = 'scene'
 
@@ -54,18 +58,19 @@ let gui: GUI
 
 let objListFolder:GUI
 
-const animation = { enabled: true, play: false }
+const animation = { enabled: false, play: false }
 const loader = new OBJLoader();
 const dragableObject: Object3D[] = [] ;
 const vertexMarkers: Mesh[] = [];
 const initialVertices: Map<Object3D, Vector3[]> = new Map();
 const initialMasses: Map<Object3D, number[]> = new Map();
+const initialPositions: Map<Object3D, Vector3> = new Map();
 
 
-
+//
 // loader.load(
 // 	// resource URL
-// 	'teapot.obj',
+// 	'cube.obj',
 // 	// called when resource is loaded
 // 	function ( object ) {
 //     object.scale.set(0.01, 0.01, 0.01);
@@ -95,7 +100,7 @@ animate()
 
 function init() {
   // ===== 🖼️ CANVAS, RENDERER, & SCENE =====
-  {
+{
     canvas = document.querySelector(`canvas#${CANVAS_ID}`)!
     renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -105,7 +110,7 @@ function init() {
   }
 
   // ===== 👨🏻‍💼 LOADING MANAGER =====
-  {
+{
     loadingManager = new LoadingManager()
 
     loadingManager.onStart = () => {
@@ -124,7 +129,7 @@ function init() {
   }
 
   // ===== 💡 LIGHTS =====
-  {
+{
     ambientLight = new AmbientLight('white', 0.4)
     pointLight = new PointLight('white', 20, 100)
     pointLight.position.set(-2, 2, 2)
@@ -139,7 +144,7 @@ function init() {
   }
 
   // ===== 📦 OBJECTS =====
-  {
+{
     const sideLength = 1
     const cubeGeometry = new BoxGeometry(sideLength, sideLength, sideLength)
     const cubeMaterial = new MeshStandardMaterial({
@@ -148,15 +153,23 @@ function init() {
       roughness: 0.7,
     })
     cube = new Mesh(cubeGeometry, cubeMaterial)
-    console.log(getVerticesFromObject(cube))
+    // console.log(getVerticesFromObject(cube))
+    console.log('cube', cube);
     cube.castShadow = true
     cube.position.y = 0.5
 
-    
+
+
     // Store initial vertices and masses for the cube
-    const cubeVertices = getVerticesFromObject(cube);
-    initialVertices.set(cube, cubeVertices.map(v => v.clone()));
-    initialMasses.set(cube, cubeVertices.map(() => 1)); // Each vertex has mass 1
+    const cubeVertices = cubeGeometry.attributes.position.array as Float32Array
+    const cubeVerticesVec3: Vector3[] = [];
+    for(let i = 0; i < cubeVertices.length; i += 3) {
+      cubeVerticesVec3.push(new Vector3(cubeVertices[i], cubeVertices[i+1], cubeVertices[i+2]));
+    }
+
+    initialVertices.set(cube, cubeVerticesVec3);
+    initialMasses.set(cube, cubeVerticesVec3.map(() => 1)); // Each vertex has mass 1
+    initialPositions.set(cube, cube.position.clone());
 
     const gridTexture = createGridTexture()
     gridTexture.wrapS = RepeatWrapping
@@ -166,7 +179,7 @@ function init() {
     const planeGeometry = new PlaneGeometry(20, 20)
     const planeMaterial = new MeshLambertMaterial({
       map: gridTexture,
-            side: DoubleSide,
+      side: DoubleSide,
       transparent: true,
       opacity: 0.6,
     })
@@ -182,13 +195,13 @@ function init() {
   }
 
   // ===== 🎥 CAMERA =====
-  {
+{
     camera = new PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000)
     camera.position.set(2, 2, 5)
   }
 
   // ===== 🕹️ CONTROLS =====
-  {
+{
     cameraControls = new OrbitControls(camera, canvas)
     cameraControls.target = cube.position.clone()
     cameraControls.enableDamping = true
@@ -230,32 +243,30 @@ function init() {
       hideVertexMarkers()
     })
     dragControls.addEventListener('drag', (event) => {
-      // console.log('dragging:', event.object);
+      // console.log("v", getWorldVertices(event.object));
       updateVertexMarkers(event.object);
-      
-      // Apply shape matching during drag
-      // Get the current vertices (moved by drag controls)
-      const currentVertices = getVerticesFromObject(event.object);
-      
-      // Get the initial vertices and masses
+
+      const object:Mesh = event.object as Mesh;
+
+      // const currentVertices = getWorldVertices(object);
       const initialVerts = initialVertices.get(event.object);
+      const initialPos:Vector3 = initialPositions.get(event.object);
       const masses = initialMasses.get(event.object);
 
-      console.log('initialVerts', initialVerts);
-      console.log('masses', masses);
-      console.log('currentVertices', currentVertices);
-      
+      // console.log("Current Vertices", currentVertices);
+
+
       // Apply shape matching if we have the needed data
       if (initialVerts && masses) {
         // We apply to the object's local vertices
-        shapeMatching(event.object, initialVerts, masses);
-        
+        shapeMatching(event.object, initialVerts, initialPos, masses);
+
         // Update vertex markers after shape matching
         updateVertexMarkers(event.object);
       }
     })
     dragControls.enabled = true
-    
+
     // Add a hint for users
     const hintElement = document.createElement('div')
     hintElement.innerHTML = 'Click and drag the cube to move it (not Chrome Browser may not work)'
@@ -278,7 +289,7 @@ function init() {
   }
 
   // ===== 🪄 HELPERS =====
-  {
+{
     axesHelper = new AxesHelper(4)
     axesHelper.visible = false
     scene.add(axesHelper)
@@ -293,47 +304,15 @@ function init() {
   }
 
   // ===== 📈 STATS & CLOCK =====
-  {
+{
     clock = new Clock()
     stats = new Stats()
     document.body.appendChild(stats.dom)
   }
 
   // ==== 🐞 DEBUG GUI ====
-  {
+{
     gui = new GUI({ title: '🐞 Debug GUI', width: 300 })
-
-    const cubeOneFolder = gui.addFolder('Cube one')
-
-    cubeOneFolder.add(cube.position, 'x').min(-5).max(5).step(0.5).name('pos x')
-    cubeOneFolder
-      .add(cube.position, 'y')
-      .min(-5)
-      .max(5)
-      .step(1)
-      .name('pos y')
-      .onChange(() => (animation.play = false))
-      .onFinishChange(() => (animation.play = true))
-    cubeOneFolder.add(cube.position, 'z').min(-5).max(5).step(0.5).name('pos z')
-
-    cubeOneFolder.add(cube.material as MeshStandardMaterial, 'wireframe')
-    cubeOneFolder.addColor(cube.material as MeshStandardMaterial, 'color')
-    cubeOneFolder.add(cube.material as MeshStandardMaterial, 'metalness', 0, 1, 0.1)
-    cubeOneFolder.add(cube.material as MeshStandardMaterial, 'roughness', 0, 1, 0.1)
-
-    cubeOneFolder
-      .add(cube.rotation, 'x', -Math.PI * 2, Math.PI * 2, Math.PI / 4)
-      .name('rotate x')
-    cubeOneFolder
-      .add(cube.rotation, 'y', -Math.PI * 2, Math.PI * 2, Math.PI / 4)
-      .name('rotate y')
-      .onChange(() => (animation.play = false))
-      .onFinishChange(() => (animation.play = true))
-    cubeOneFolder
-      .add(cube.rotation, 'z', -Math.PI * 2, Math.PI * 2, Math.PI / 4)
-      .name('rotate z')
-
-    cubeOneFolder.add(animation, 'enabled').name('animated')
 
     const controlsFolder = gui.addFolder('Controls')
     controlsFolder.add(dragControls, 'enabled').name('drag controls').setValue(true)
@@ -348,10 +327,10 @@ function init() {
 
     const cameraFolder = gui.addFolder('Camera')
     cameraFolder.add(cameraControls, 'autoRotate')
-      
+
 
     // objListFolder = gui.addFolder('OBJ Files') 
-    
+
 
     // persist GUI state in local storage on changes
     gui.onFinishChange(() => {
@@ -399,19 +378,19 @@ function animate() {
 function showVertices(object: Object3D) {
   // Clear any existing markers
   hideVertexMarkers();
-  
+
   // Get vertices from the object
   const vertices = getVerticesFromObject(object);
-  
+
   // Create a marker for each vertex
   const markerGeometry = new BoxGeometry(0.05, 0.05, 0.05);
   const markerMaterial = new MeshBasicMaterial({ color: 'red' });
-  
+
   vertices.forEach(vertex => {
     // Apply object's world matrix to transform the vertex
     const worldVertex = vertex.clone();
     worldVertex.applyMatrix4(object.matrixWorld);
-    
+
     const marker = new Mesh(markerGeometry, markerMaterial);
     marker.position.copy(worldVertex);
     scene.add(marker);
@@ -423,7 +402,7 @@ function showVertices(object: Object3D) {
 function updateVertexMarkers(object: Object3D) {
   // Get current vertices
   const vertices = getVerticesFromObject(object);
-  
+
   // Update marker positions
   for (let i = 0; i < vertices.length && i < vertexMarkers.length; i++) {
     // Apply object's world matrix to transform the vertex
