@@ -161,16 +161,16 @@ function extractRotation(Apq: Matrix3): Matrix3 {
 }
 
 
-function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentroid: Vector3, masses: number[]) {
+function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentroid: Vector3, masses: number[], dampingFactor: number = 0.1) {
     const currentVertices = getAllWorldVertices(object);
     const numPoints = currentVertices.length;
 
-    console.group("shapeMatching");
-    console.log("currentVertices", currentVertices);
-    console.log("currentCentroid", object.position);
-    console.log("targetVertices", targetVertices);
-    console.log("targetCentroid", targetCentroid);
-    console.groupEnd();
+    // console.group("shapeMatching");
+    // console.log("currentVertices", currentVertices);
+    // console.log("currentCentroid", object.position);
+    // console.log("targetVertices", targetVertices);
+    // console.log("targetCentroid", targetCentroid);
+    // console.groupEnd();
 
     if (targetVertices.length !== numPoints || masses.length !== numPoints) {
         throw new Error("Vertex count mismatch");
@@ -197,15 +197,28 @@ function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentro
         newVertices.push(newPos);
     }
 
-    // Step 6: 將新頂點位置寫入 geometry
+    // Step 6: Apply damping to make the transition more gradual
     object.traverse((child) => {
         if (child instanceof Mesh) {
             const geometry = child.geometry;
             if (geometry instanceof BufferGeometry) {
                 const positionAttr = geometry.attributes.position;
-                for (let i = 0; i < newVertices.length; i++) {
-                    const v = newVertices[i];
-                    positionAttr.setXYZ(i, v.x, v.y, v.z);
+                for (let i = 0; i < Math.min(newVertices.length, positionAttr.count); i++) {
+                    const currentPos = new Vector3(
+                        positionAttr.getX(i),
+                        positionAttr.getY(i),
+                        positionAttr.getZ(i)
+                    );
+                    
+                    // Convert new vertex from world to local space
+                    const targetPos = newVertices[i].clone();
+                    child.worldToLocal(targetPos);
+                    
+                    // Apply damping: interpolate between current and target position
+                    const dampedPos = currentPos.lerp(targetPos, dampingFactor);
+                    
+                    // Set the new position
+                    positionAttr.setXYZ(i, dampedPos.x, dampedPos.y, dampedPos.z);
                 }
                 positionAttr.needsUpdate = true;
             }

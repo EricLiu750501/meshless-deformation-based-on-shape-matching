@@ -38,6 +38,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import './style.css'
 import {getVerticesFromObject, shapeMatching, getWorldVertices, getAllWorldVertices} from './helpers/shapeMatching'
 
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 const CANVAS_ID = 'scene'
 
 let canvas: HTMLElement
@@ -57,6 +58,8 @@ let stats: Stats
 let gui: GUI
 
 let objListFolder:GUI
+
+let shapeMatchingOptions: { dampingFactor: number, applyForce: () => void }
 
 const animation = { enabled: false, play: false }
 const loader = new OBJLoader();
@@ -145,23 +148,72 @@ function init() {
 
   // ===== 📦 OBJECTS =====
 {
-    const sideLength = 1
-    const cubeGeometry = new BoxGeometry(sideLength, sideLength, sideLength)
-    const cubeMaterial = new MeshStandardMaterial({
+    // const sideLength = 1
+    // const cubeGeometry = new BoxGeometry(sideLength, sideLength, sideLength)
+    // const cubeMaterial = new MeshStandardMaterial({
+    //   color: '#f69f1f',
+    //   metalness: 0.5,
+    //   roughness: 0.7,
+    //   side: DoubleSide,
+    // })
+    // cube = new Mesh(cubeGeometry, cubeMaterial)
+    // // console.log(getVerticesFromObject(cube))
+    // console.log('cube', cube);
+    // cube.castShadow = true
+    // cube.position.y = 0.5
+
+    const cubeVerticesInit = [
+      [-0.5, -0.5, -0.5],
+      [ 0.5, -0.5, -0.5],
+      [ 0.5,  0.5, -0.5],
+      [-0.5,  0.5, -0.5],
+      [-0.5, -0.5,  0.5],
+      [ 0.5, -0.5,  0.5],
+      [ 0.5,  0.5,  0.5],
+      [-0.5,  0.5,  0.5],
+    ]
+
+    const positions = new Float32Array(cubeVerticesInit.flat())
+    const cubeGeometry = new BufferGeometry()
+    cubeGeometry.setAttribute('position', new BufferAttribute(positions, 3))
+
+    // 可選：用索引資料建立面
+    const indices = [
+      // 前面
+      0, 1, 2, 0, 2, 3,
+      // 後面
+      4, 6, 5, 4, 7, 6,
+      // 上面
+      3, 2, 6, 3, 6, 7,
+      // 下面
+      0, 5, 1, 0, 4, 5,
+      // 右面
+      1, 5, 6, 1, 6, 2,
+      // 左面
+      4, 0, 3, 4, 3, 7,
+    ]
+    cubeGeometry.setIndex(indices)
+    cubeGeometry.computeVertexNormals()
+
+    const material = new MeshStandardMaterial({
       color: '#f69f1f',
       metalness: 0.5,
       roughness: 0.7,
+      side: DoubleSide,
     })
-    cube = new Mesh(cubeGeometry, cubeMaterial)
-    // console.log(getVerticesFromObject(cube))
-    console.log('cube', cube);
+
+    cube = new Mesh(cubeGeometry, material)
     cube.castShadow = true
     cube.position.y = 0.5
+    scene.add(cube)
+
 
 
 
     // Store initial vertices and masses for the cube
     const cubeVertices = cubeGeometry.attributes.position.array as Float32Array
+    const merged = BufferGeometryUtils.mergeVertices(cube.geometry)
+    console.log('merged vertex count:', merged.attributes.position)
     const cubeVerticesVec3: Vector3[] = [];
     for(let i = 0; i < cubeVertices.length; i += 3) {
       cubeVerticesVec3.push(new Vector3(cubeVertices[i], cubeVertices[i+1], cubeVertices[i+2]));
@@ -246,7 +298,7 @@ function init() {
       // console.log("v", getWorldVertices(event.object));
       updateVertexMarkers(event.object);
 
-      const object:Mesh = event.object as Mesh;
+      // const object:Mesh = event.object as Mesh;
 
       // const currentVertices = getWorldVertices(object);
       const initialVerts = initialVertices.get(event.object);
@@ -257,7 +309,7 @@ function init() {
 
 
       // Apply shape matching if we have the needed data
-      if (initialVerts && masses) {
+      if (initialVerts && masses && initialPos) {
         // We apply to the object's local vertices
         shapeMatching(event.object, initialVerts, initialPos, masses);
 
@@ -329,7 +381,23 @@ function init() {
     cameraFolder.add(cameraControls, 'autoRotate')
 
 
+    const simulationFolder = gui.addFolder('Physics Simulation')
+    shapeMatchingOptions = {
+      dampingFactor: 0.005,
+      applyForce: () => {
+        // Apply a random force to the cube
+        const force = new Vector3(
+          (Math.random() - 0.5) * 2,
+          0, 0
+        );
+        applyForceAndSimulate(cube, force);
+      }
+    };
+    simulationFolder.add(shapeMatchingOptions, 'dampingFactor', 0.005, 1).name('Shape Matching Speed');
+    simulationFolder.add(shapeMatchingOptions, 'applyForce').name('Apply Random Force');
     // objListFolder = gui.addFolder('OBJ Files') 
+
+
 
 
     // persist GUI state in local storage on changes
@@ -349,7 +417,7 @@ function init() {
     }
     gui.add({ resetGui }, 'resetGui').name('RESET')
 
-    gui.close()
+    // gui.close()
   }
 }
 
@@ -359,7 +427,20 @@ function animate() {
   stats.begin()
   if (animation.enabled && animation.play) {
     // animations.rotate(cube, clock, Math.PI / 3)
-    animations.bounce(cube, clock, 1, 0.5, 0.5)
+    // animations.bounce(cube, clock, 1, 0.5, 0.5)
+    if (animation.enabled && animation.play) {
+      // Apply shape matching to all objects with stored data
+      for (const object of dragableObject) {
+        const initialVerts = initialVertices.get(object);
+        const initialPos = initialPositions.get(object);
+        const masses = initialMasses.get(object);
+
+        if (initialVerts && initialPos && masses) {
+          shapeMatching(object, initialVerts, initialPos, masses, shapeMatchingOptions.dampingFactor);
+        }
+      }
+    }
+
   }
 
   if (resizeRendererToDisplaySize(renderer)) {
@@ -419,6 +500,58 @@ function hideVertexMarkers() {
   });
   vertexMarkers.length = 0;
 }
+
+// Function to apply force to multiple random vertices
+function applyForceAndSimulate(object: Object3D, force: Vector3) {
+  // Get initial data
+  const initialVerts = initialVertices.get(object);
+  const initialPos = initialPositions.get(object);
+  const masses = initialMasses.get(object);
+
+  if (!initialVerts || !initialPos || !masses) return;
+
+  // Show vertices
+  showVertices(object);
+
+  // Select multiple random vertices to apply force to
+  object.traverse((child) => {
+    if (child instanceof Mesh) {
+      const geometry = child.geometry;
+      if (geometry instanceof BufferGeometry) {
+        const positionAttr = geometry.attributes.position;
+
+        // Determine how many vertices to affect (20-40% of total)
+        const numVerticesToAffect = Math.max(1, Math.floor(positionAttr.count * (0.2 + Math.random() * 0.2)));
+        console.log(`Applying force to ${numVerticesToAffect} vertices`);
+
+        // Affect multiple random vertices
+        for (let i = 0; i < numVerticesToAffect; i++) {
+          const randomVertexIndex = Math.floor(Math.random() * positionAttr.count);
+          const vertex = new Vector3().fromBufferAttribute(positionAttr, randomVertexIndex);
+
+          // Vary the force slightly for each vertex for more natural deformation
+          const vertexForce = force.clone().multiplyScalar(0.8 + Math.random() * 0.4);
+
+          // Apply "force" by moving the vertex
+          vertex.add(vertexForce);
+
+          // Update the position of this vertex
+          positionAttr.setXYZ(randomVertexIndex, vertex.x, vertex.y, vertex.z);
+        }
+
+        positionAttr.needsUpdate = true;
+      }
+    }
+  });
+
+  // Update markers
+  updateVertexMarkers(object);
+
+  // Add shape matching to animation loop for this object
+  animation.enabled = true;
+  animation.play = true;
+}
+
 
 
 export {
