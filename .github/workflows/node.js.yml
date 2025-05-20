@@ -24,4 +24,5 @@ jobs:
             base: "/${{github.event.repository.name}}/"
           }' > vite.config.js
       - name: Build project
+        working-directory: ./src
         run: npm run build
