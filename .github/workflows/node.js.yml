@@ -18,6 +18,7 @@ jobs:
         working-directory: ./src
         run: npm install
       - name: Configure vite
+        working-directory: ./src
         run: |
           echo 'export default {
             base: "/${{github.event.repository.name}}/"
