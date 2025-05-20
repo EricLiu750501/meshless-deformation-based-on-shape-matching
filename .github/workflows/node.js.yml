@@ -14,9 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: goto src
-        run: cd ./src
       - name: Install dependencies
+        working-directory: ./src
         run: npm install
       - name: Configure vite
         run: |
