@@ -82,15 +82,15 @@ export function getAllWorldVertices(object: Object3D): Vector3[] {
  * @param shape - An array of 3D vertices (Vector3), Assume that all vertices weight = 1
  * @returns The centroid as a Vector3
  */
-function calculateCentroid(shape: Vector3[]): Vector3 {
-    const sum = new Vector3();
-
-    for (let i = 0; i < shape.length; i++) {
-        sum.add(shape[i]);
-    }
-
-    return sum.divideScalar(shape.length);
-}
+// function calculateCentroid(shape: Vector3[]): Vector3 {
+//     const sum = new Vector3();
+//
+//     for (let i = 0; i < shape.length; i++) {
+//         sum.add(shape[i]);
+//     }
+//
+//     return sum.divideScalar(shape.length);
+// }
 
 function calculateRelatedPosition(shape: Vector3[], centroid: Vector3): Vector3[] {
     const relatedPosition: Vector3[] = [];
@@ -120,6 +120,7 @@ function calculateA_pq(p:Vector3[], q:Vector3[], masses:number[]):Matrix3 {
             qi.z * pi.x, qi.z * pi.y, qi.z * pi.z
         ).multiplyScalar(m);
         A_pq.elements.forEach((val, idx) => {
+            val
             A_pq.elements[idx] += outerProduct.elements[idx];
         });
     }

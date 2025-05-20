@@ -42,7 +42,7 @@ fileInput.addEventListener('change', (event) => {
 
 function updateGuiSelection(objListFolder:any, params:any) {
     objListFolder.destroy();
-    objListFolder = gui.addFolder('OBJ Files');
+    // objListFolder = gui.addFolder('OBJ Files');
     objListFolder.add(params, 'selectedObject', objList);
     objListFolder.open();
 

@@ -22,7 +22,7 @@ import {
   Object3D,
   Vector3,
   BufferGeometry,
-  MeshNormalMaterial,
+  // MeshNormalMaterial,
   BufferAttribute,
 
 
@@ -30,13 +30,13 @@ import {
 import { DragControls } from 'three/addons/controls/DragControls.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import Stats from 'stats.js'
-import * as animations from './helpers/animations'
+// import * as animations from './helpers/animations'
 import { toggleFullScreen } from './helpers/fullscreen'
 import { resizeRendererToDisplaySize } from './helpers/responsiveness'
 import { createGridTexture } from './helpers/plane'
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+// import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import './style.css'
-import {getVerticesFromObject, shapeMatching, getWorldVertices, getAllWorldVertices} from './helpers/shapeMatching'
+import {getVerticesFromObject, shapeMatching} from './helpers/shapeMatching'
 
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 const CANVAS_ID = 'scene'
@@ -62,7 +62,7 @@ let objListFolder:GUI
 let shapeMatchingOptions: { dampingFactor: number, applyForce: () => void }
 
 const animation = { enabled: false, play: false }
-const loader = new OBJLoader();
+// const loader = new OBJLoader();
 const dragableObject: Object3D[] = [] ;
 const vertexMarkers: Mesh[] = [];
 const initialVertices: Map<Object3D, Vector3[]> = new Map();
@@ -302,7 +302,7 @@ function init() {
 
       // const currentVertices = getWorldVertices(object);
       const initialVerts = initialVertices.get(event.object);
-      const initialPos:Vector3 = initialPositions.get(event.object);
+      const initialPos:Vector3 = initialPositions.get(event.object)!;
       const masses = initialMasses.get(event.object);
 
       // console.log("Current Vertices", currentVertices);
@@ -358,6 +358,7 @@ function init() {
   // ===== 📈 STATS & CLOCK =====
 {
     clock = new Clock()
+    clock.start()
     stats = new Stats()
     document.body.appendChild(stats.dom)
   }
