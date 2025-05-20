@@ -7,3 +7,5 @@ Use the Template  https://github.com/pachoclo/vite-threejs-ts-template
 
 ## Dependencies
 Node.js
+
+## [Demo](https://ericliu750501.github.io/meshless-deformation-based-on-shape-matching/)
