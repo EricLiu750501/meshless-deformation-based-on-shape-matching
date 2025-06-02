@@ -23,9 +23,6 @@ import {
   Vector3,
   BufferGeometry,
   BufferAttribute,
-  Raycaster,
-  Vector2,
-  SphereGeometry,
 } from 'three'
 import { DragControls } from 'three/addons/controls/DragControls.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
@@ -56,9 +53,6 @@ let pointLightHelper: PointLightHelper
 let clock: Clock
 let stats: Stats
 let gui: GUI
-let objLoader: OBJLoader
-let raycaster: Raycaster
-let mouse: Vector2
 
 // Simulation parameters interface
 interface SimulationParams {
@@ -133,9 +127,7 @@ const userInput = {
   isCtrlPressed: false,
   forceDirection: { x: 0, y: 0, z: 0 },
   draggedObject: null as Object3D | null,
-  draggedVertex: -1,
-  isPicking: false,
-  pickedVertexIndex: -1
+  draggedVertex: -1
 }
 
 // Statistics display object for GUI
@@ -145,6 +137,9 @@ const statsDisplay = {
   triangles: '0',
   memory: '0 KB'
 }
+
+// OBJ Loader
+const objLoader = new OBJLoader(loadingManager)
 
 init()
 animate()
@@ -159,6 +154,7 @@ function init() {
     renderer.shadowMap.type = PCFSoftShadowMap
     scene = new Scene()
   }
+
   // ===== 👨🏻‍💼 LOADING MANAGER =====
   {
     loadingManager = new LoadingManager()
@@ -168,15 +164,6 @@ function init() {
     }
     loadingManager.onLoad = () => console.log('loaded!')
     loadingManager.onError = () => console.log('❌ error while loading')
-    
-    // Initialize OBJ loader after loading manager
-    objLoader = new OBJLoader(loadingManager)
-  }
-
-  // ===== 🔍 RAYCASTER =====
-  {
-    raycaster = new Raycaster()
-    mouse = new Vector2()
   }
 
   // ===== 💡 LIGHTS =====
@@ -366,14 +353,9 @@ function setupControls() {
   })
 
   dragControls.enabled = true
+
   // Mouse controls for vertex fixing (Shift+Click)
   canvas.addEventListener('click', handleCanvasClick)
-  
-  // Mouse move for vertex picking
-  canvas.addEventListener('mousemove', handleMouseMove)
-  
-  // Mouse up to end picking
-  canvas.addEventListener('mouseup', handleMouseUp)
   
   // Full screen on double click
   window.addEventListener('dblclick', (event) => {
@@ -507,34 +489,23 @@ function setupKeyboardControls() {
     // Force application keys (based on reference project)
     switch (event.key.toLowerCase()) {
       case 'i': // Up force
-        event.preventDefault()
         applyDirectionalForce(new Vector3(0, simParams.Famplitude, 0))
-        showForceIndicator('UP')
         break
       case 'k': // Down force
-        event.preventDefault()
         applyDirectionalForce(new Vector3(0, -simParams.Famplitude, 0))
-        showForceIndicator('DOWN')
         break
       case 'j': // Left force
-        event.preventDefault()
         applyDirectionalForce(new Vector3(-simParams.Famplitude, 0, 0))
-        showForceIndicator('LEFT')
         break
       case 'l': // Right force
-        event.preventDefault()
         applyDirectionalForce(new Vector3(simParams.Famplitude, 0, 0))
-        showForceIndicator('RIGHT')
         break
       case ' ': // Forward force (space)
         event.preventDefault()
         applyDirectionalForce(new Vector3(0, 0, simParams.Famplitude))
-        showForceIndicator('FORWARD')
         break
       case 'b': // Backward force
-        event.preventDefault()
         applyDirectionalForce(new Vector3(0, 0, -simParams.Famplitude))
-        showForceIndicator('BACKWARD')
         break
     }
   })
@@ -542,169 +513,14 @@ function setupKeyboardControls() {
   window.addEventListener('keyup', (event) => {
     userInput.isShiftPressed = event.shiftKey
     userInput.isCtrlPressed = event.ctrlKey
-    hideForceIndicator()
   })
 }
 
-function showForceIndicator(direction: string) {
-  // Remove existing force indicator
-  hideForceIndicator()
-  
-  // Create force indicator element
-  const indicator = document.createElement('div')
-  indicator.id = 'force-indicator'
-  indicator.innerHTML = `<strong>Force Applied: ${direction}</strong>`
-  indicator.style.position = 'absolute'
-  indicator.style.top = '20px'
-  indicator.style.left = '50%'
-  indicator.style.transform = 'translateX(-50%)'
-  indicator.style.color = 'white'
-  indicator.style.padding = '10px 20px'
-  indicator.style.backgroundColor = 'rgba(255, 100, 100, 0.8)'
-  indicator.style.borderRadius = '8px'
-  indicator.style.fontSize = '16px'
-  indicator.style.fontWeight = 'bold'
-  indicator.style.zIndex = '1000'
-  indicator.style.border = '2px solid red'
-  
-  document.body.appendChild(indicator)
-  
-  // Auto-hide after 2 seconds
-  setTimeout(hideForceIndicator, 2000)
-}
-
-function hideForceIndicator() {
-  const indicator = document.getElementById('force-indicator')
-  if (indicator) {
-    indicator.remove()
-  }
-}
-
 function handleCanvasClick(event: MouseEvent) {
-  // Update mouse coordinates
-  const rect = canvas.getBoundingClientRect()
-  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
-
-  // Update raycaster
-  raycaster.setFromCamera(mouse, camera)
-  
-  // Find intersections with dragable objects
-  const intersects = raycaster.intersectObjects(dragableObjects, true)
-  
-  if (intersects.length > 0) {
-    const intersect = intersects[0]
-    const object = intersect.object
-    
-    if (userInput.isShiftPressed) {
-      // Fix/unfix vertex functionality
-      handleVertexFixing(object, intersect)
-    } else if (userInput.isCtrlPressed) {
-      // Start vertex picking
-      handleVertexPicking(object, intersect)
-    }
-  }
-}
-
-function handleVertexFixing(object: Object3D, intersect: any) {
-  if (intersect.face && object instanceof Mesh) {
-    const geometry = object.geometry as BufferGeometry
-    const position = geometry.attributes.position
-    
-    // Get the closest vertex to the intersection point
-    const vertices = [intersect.face.a, intersect.face.b, intersect.face.c]
-    let closestVertex = vertices[0]
-    let minDistance = Infinity
-    
-    const intersectionPoint = intersect.point.clone()
-    intersectionPoint.applyMatrix4(object.matrixWorld.clone().invert())
-    
-    for (const vertexIndex of vertices) {
-      const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
-      const distance = vertex.distanceTo(intersectionPoint)
-      if (distance < minDistance) {
-        minDistance = distance
-        closestVertex = vertexIndex
-      }
-    }
-    
-    // Toggle fixed state
-    if (fixedVertices.has(closestVertex)) {
-      fixedVertices.delete(closestVertex)
-      removeFixedVertexMarker(object, closestVertex)
-      console.log(`Vertex ${closestVertex} unfixed`)
-    } else {
-      fixedVertices.add(closestVertex)
-      addFixedVertexMarker(object, closestVertex)
-      console.log(`Vertex ${closestVertex} fixed`)
-    }
-  }
-}
-
-function handleVertexPicking(object: Object3D, intersect: any) {
-  if (intersect.face && object instanceof Mesh) {
-    const geometry = object.geometry as BufferGeometry
-    const position = geometry.attributes.position
-    
-    // Get the closest vertex to the intersection point
-    const vertices = [intersect.face.a, intersect.face.b, intersect.face.c]
-    let closestVertex = vertices[0]
-    let minDistance = Infinity
-    
-    const intersectionPoint = intersect.point.clone()
-    intersectionPoint.applyMatrix4(object.matrixWorld.clone().invert())
-    
-    for (const vertexIndex of vertices) {
-      const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
-      const distance = vertex.distanceTo(intersectionPoint)
-      if (distance < minDistance) {
-        minDistance = distance
-        closestVertex = vertexIndex
-      }
-    }
-    
-    // Start picking mode
-    userInput.isPicking = true
-    userInput.pickedVertexIndex = closestVertex
-    userInput.draggedObject = object
-    
-    console.log(`Started picking vertex ${closestVertex}`)
-    
-    // Disable camera controls while picking
-    cameraControls.enabled = false
-  }
-}
-
-function addFixedVertexMarker(object: Object3D, vertexIndex: number) {
-  if (object instanceof Mesh) {
-    const geometry = object.geometry as BufferGeometry
-    const position = geometry.attributes.position
-    const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
-    
-    // Convert to world coordinates
-    vertex.applyMatrix4(object.matrixWorld)
-    
-    // Create red sphere marker for fixed vertex
-    const markerGeometry = new SphereGeometry(0.02, 8, 6)
-    const markerMaterial = new MeshBasicMaterial({ color: 'red' })
-    const marker = new Mesh(markerGeometry, markerMaterial)
-    marker.position.copy(vertex)
-    marker.userData = { vertexIndex, object }
-    
-    scene.add(marker)
-    fixedVertexMarkers.push(marker)
-  }
-}
-
-function removeFixedVertexMarker(object: Object3D, vertexIndex: number) {
-  const markerIndex = fixedVertexMarkers.findIndex(marker => 
-    marker.userData.vertexIndex === vertexIndex && marker.userData.object === object
-  )
-  
-  if (markerIndex !== -1) {
-    const marker = fixedVertexMarkers[markerIndex]
-    scene.remove(marker)
-    fixedVertexMarkers.splice(markerIndex, 1)
+  if (userInput.isShiftPressed) {
+    // Fix/unfix vertex
+    // TODO: Implement vertex picking for fixing
+    console.log('Shift+Click: Fix/unfix vertex functionality')
   }
 }
 
@@ -834,13 +650,7 @@ function updateStatistics() {
     return total + vertices.length
   }, 0).toString()
   statsDisplay.triangles = '0' // TODO: Calculate triangles
-  
-  // Safe memory usage check
-  if (typeof (performance as any).memory !== 'undefined') {
-    statsDisplay.memory = Math.round((performance as any).memory.usedJSHeapSize / 1024) + ' KB'
-  } else {
-    statsDisplay.memory = 'N/A'
-  }
+  statsDisplay.memory = Math.round(performance.memory?.usedJSHeapSize / 1024 || 0) + ' KB'
 }
 
 // Vertex visualization functions
@@ -917,62 +727,6 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
 
   animation.enabled = true
   animation.play = true
-}
-
-function handleMouseMove(event: MouseEvent) {
-  if (userInput.isPicking && userInput.draggedObject && userInput.pickedVertexIndex !== -1) {
-    // Update mouse coordinates
-    const rect = canvas.getBoundingClientRect()
-    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
-
-    // Update raycaster
-    raycaster.setFromCamera(mouse, camera)
-    
-    // Cast ray to a virtual plane for vertex dragging
-    const distance = camera.position.distanceTo(userInput.draggedObject.position)
-    const intersectionPoint = new Vector3()
-    
-    raycaster.ray.at(distance, intersectionPoint)
-    
-    // Apply the movement to the vertex
-    if (userInput.draggedObject instanceof Mesh) {
-      const geometry = userInput.draggedObject.geometry as BufferGeometry
-      const position = geometry.attributes.position
-      
-      // Convert world space movement to object space
-      const localPoint = intersectionPoint.clone()
-      localPoint.applyMatrix4(userInput.draggedObject.matrixWorld.clone().invert())
-      
-      // Apply force based on movement
-      const currentVertex = new Vector3().fromBufferAttribute(position, userInput.pickedVertexIndex)
-      const force = localPoint.clone().sub(currentVertex).multiplyScalar(simParams.pickForce * 0.1)
-      
-      // Apply the force
-      currentVertex.add(force)
-      position.setXYZ(userInput.pickedVertexIndex, currentVertex.x, currentVertex.y, currentVertex.z)
-      position.needsUpdate = true
-      
-      // Trigger shape matching
-      const initialVerts = initialVertices.get(userInput.draggedObject)
-      const initialPos = initialPositions.get(userInput.draggedObject)
-      const masses = initialMasses.get(userInput.draggedObject)
-      
-      if (initialVerts && initialPos && masses) {
-        shapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, simParams.dampingFactor)
-      }
-    }
-  }
-}
-
-function handleMouseUp(_event: MouseEvent) {
-  if (userInput.isPicking) {
-    userInput.isPicking = false
-    userInput.pickedVertexIndex = -1
-    userInput.draggedObject = null
-    cameraControls.enabled = true
-    console.log('Ended vertex picking')
-  }
 }
 
 export { gui }
