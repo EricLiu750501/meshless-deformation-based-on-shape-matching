@@ -23,9 +23,10 @@ import {
   Vector3,
   BufferGeometry,
   BufferAttribute,
-  Raycaster,
-  Vector2,
+  Raycaster,  Vector2,
   SphereGeometry,
+  Box3,
+  Box3Helper,
 } from 'three'
 import { DragControls } from 'three/addons/controls/DragControls.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
@@ -60,6 +61,9 @@ let objLoader: OBJLoader
 let raycaster: Raycaster
 let mouse: Vector2
 
+// Bounding box helper
+let boundingBoxHelper: Object3D | null = null
+
 // Simulation parameters interface
 interface SimulationParams {
   // Physics
@@ -77,11 +81,12 @@ interface SimulationParams {
   
   // Deformation type
   deformationType: 'rotation' | 'linear' | 'quadratic'
-  
-  // Visualization
+    // Visualization
   showWireframe: boolean
   showVertexMarkers: boolean
   showForceField: boolean
+  showTriangles: boolean
+  showBoundingBox: boolean
   showFixedPoints: boolean
   
   // Control
@@ -101,14 +106,15 @@ const simParams: SimulationParams = {
   beta: 0.3, // Reduced to favor rotation over linear/quadratic
   tau: 0.8,
   perturbation: 1e-4, // Increased for better numerical stability
-  dt: 0.016,
-  Famplitude: 5, // Reduced force amplitude
+  dt: 0.016,  Famplitude: 5, // Reduced force amplitude
   pickForce: 5, // Reduced picking force
   hasGravity: false,
   deformationType: 'rotation', // Start with the most stable deformation type
   showWireframe: false,
   showVertexMarkers: false,
   showForceField: false,
+  showTriangles: false,
+  showBoundingBox: false,
   showFixedPoints: true,
   pause: false,
   fps: 0,
@@ -423,7 +429,6 @@ function setupGUI() {
   physicsFolder.add(simParams, 'dt', 0.001, 1.0).name('Time Step')
   physicsFolder.add(simParams, 'hasGravity').name('Activate Gravity')
   physicsFolder.add(simParams, 'pause').name('Pause')
-
   // Deformation Types folder
   const deformationFolder = gui.addFolder('Deformation Types')
   const deformationTypes = {
@@ -432,7 +437,6 @@ function setupGUI() {
     'Quadratic': 'quadratic' as const
   }
   deformationFolder.add(simParams, 'deformationType', deformationTypes).name('Type')
-
   // Visualization folder
   const visualizationFolder = gui.addFolder('Visualization')
   visualizationFolder.add(simParams, 'showWireframe').name('Show Wireframe').onChange((value: boolean) => {
@@ -441,6 +445,22 @@ function setupGUI() {
   })
   visualizationFolder.add(simParams, 'showVertexMarkers').name('Show Vertex Markers')
   visualizationFolder.add(simParams, 'showForceField').name('Show Force Field')
+  visualizationFolder.add(simParams, 'showTriangles').name('Show Triangles').onChange((value: boolean) => {
+    // This shows the mesh structure - for now using wireframe
+    // In a more advanced implementation, this could show triangle edges as separate lines
+    if (cube) {
+      const material = cube.material as MeshStandardMaterial
+      // We differentiate from wireframe by showing both solid and wireframe
+      if (value) {
+        material.wireframe = false
+        // Could add a separate wireframe mesh here for better visualization
+      }
+    }
+  })
+  visualizationFolder.add(simParams, 'showBoundingBox').name('Show Bounding Box').onChange((value: boolean) => {
+    // Will implement bounding box visibility logic here
+    updateBoundingBoxVisibility(value)
+  })
   visualizationFolder.add(simParams, 'showFixedPoints').name('Show Fixed Points').onChange((value: boolean) => {
     fixedVertexMarkers.forEach(marker => {
       marker.visible = value
@@ -832,9 +852,14 @@ function animate() {
         enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
       }
     }
-    
-    // Update fixed vertex markers after deformation
+      // Update fixed vertex markers after deformation
     updateFixedVertexMarkers()
+    
+    // Update bounding box if visible
+    if (simParams.showBoundingBox && boundingBoxHelper && cube) {
+      const box = new Box3().setFromObject(cube)
+      ;(boundingBoxHelper as Box3Helper).box.copy(box)
+    }
   }
 
   // Handle responsive canvas
@@ -991,6 +1016,24 @@ function handleMouseMove(event: MouseEvent) {
         enhancedShapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, shapeMatchingParams)
       }
     }
+  }
+}
+
+function updateBoundingBoxVisibility(visible: boolean) {
+  if (visible) {
+    // Create bounding box helper if it doesn't exist
+    if (!boundingBoxHelper && cube) {
+      const box = new Box3().setFromObject(cube)
+      boundingBoxHelper = new Box3Helper(box, 0xffff00) // Yellow color
+      scene.add(boundingBoxHelper)
+    } else if (boundingBoxHelper && cube) {
+      // Update bounding box to current object state
+      const box = new Box3().setFromObject(cube)
+      ;(boundingBoxHelper as Box3Helper).box.copy(box)
+      boundingBoxHelper.visible = true
+    }
+  } else if (boundingBoxHelper) {
+    boundingBoxHelper.visible = false
   }
 }
 
