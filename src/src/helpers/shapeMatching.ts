@@ -24,6 +24,7 @@ export interface ShapeMatchingParams {
   tau: number;
   perturbation: number;
   dampingFactor: number;
+  fixedVertices?: Set<number>; // Optional set of vertex indices that should not be deformed
 }
 
 
@@ -103,6 +104,42 @@ export function getAllWorldVertices(object: Object3D): Vector3[] {
 //
 //     return sum.divideScalar(shape.length);
 // }
+
+/**
+ * Calculate the centroid (mean position) of a set of vertices with masses
+ * @param vertices - An array of 3D vertices (Vector3)
+ * @param masses - Array of masses corresponding to each vertex
+ * @returns The weighted centroid as a Vector3
+ */
+function calculateCentroidWithMasses(vertices: Vector3[], masses: number[]): Vector3 {
+    if (vertices.length !== masses.length) {
+        throw new Error("Vertices and masses arrays must have the same length");
+    }
+    
+    if (vertices.length === 0) {
+        return new Vector3(0, 0, 0);
+    }
+
+    const weightedSum = new Vector3();
+    let totalMass = 0;
+
+    for (let i = 0; i < vertices.length; i++) {
+        const weightedVertex = vertices[i].clone().multiplyScalar(masses[i]);
+        weightedSum.add(weightedVertex);
+        totalMass += masses[i];
+    }
+
+    if (totalMass === 0) {
+        // If all masses are zero, return simple centroid
+        const sum = new Vector3();
+        for (let i = 0; i < vertices.length; i++) {
+            sum.add(vertices[i]);
+        }
+        return sum.divideScalar(vertices.length);
+    }
+
+    return weightedSum.divideScalar(totalMass);
+}
 
 function calculateRelatedPosition(shape: Vector3[], centroid: Vector3): Vector3[] {
     const relatedPosition: Vector3[] = [];
@@ -428,7 +465,7 @@ function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentro
 function enhancedShapeMatching(
     object: Object3D, 
     targetVertices: Vector3[], 
-    targetCentroid: Vector3, 
+    _targetCentroid: Vector3, // Note: Not used directly, computed from movable vertices for better fixed vertex handling
     masses: number[], 
     params: ShapeMatchingParams
 ) {
@@ -441,7 +478,7 @@ function enhancedShapeMatching(
             target: targetVertices.length,
             masses: masses.length
         });
-        return; // Don't apply deformation if there's a mismatch
+        return;
     }
 
     // Add safety checks
@@ -454,15 +491,46 @@ function enhancedShapeMatching(
     const validMasses = masses.every(m => m > 0 && isFinite(m));
     if (!validMasses) {
         console.warn("Invalid masses detected, using default values");
-        masses = masses.map(() => 1.0); // Use unit masses as fallback
+        masses = masses.map(() => 1.0);
     }
 
-    // Step 1: Compute centroids
-    const currentCentroid = object.position.clone();
+    // Handle fixed vertices by excluding them from shape matching calculations
+    const fixedVertices = params.fixedVertices || new Set<number>();
+    
+    // If all vertices are fixed, don't apply any deformation
+    if (fixedVertices.size >= numPoints) {
+        console.warn("All vertices are fixed, skipping deformation");
+        return;
+    }
 
-    // Step 2: Compute relative positions
-    const p = calculateRelatedPosition(currentVertices, currentCentroid);
-    const q = calculateRelatedPosition(targetVertices, targetCentroid);
+    // Filter out fixed vertices for shape matching calculations
+    const movableIndices: number[] = [];
+    const movableCurrentVertices: Vector3[] = [];
+    const movableTargetVertices: Vector3[] = [];
+    const movableMasses: number[] = [];
+
+    for (let i = 0; i < numPoints; i++) {
+        if (!fixedVertices.has(i)) {
+            movableIndices.push(i);
+            movableCurrentVertices.push(currentVertices[i].clone());
+            movableTargetVertices.push(targetVertices[i].clone());
+            movableMasses.push(masses[i]);
+        }
+    }
+
+    // If no movable vertices, skip deformation
+    if (movableIndices.length === 0) {
+        console.warn("No movable vertices found, skipping deformation");
+        return;
+    }
+
+    // Calculate centroids based only on movable vertices
+    const movableCurrentCentroid = calculateCentroidWithMasses(movableCurrentVertices, movableMasses);
+    const movableTargetCentroid = calculateCentroidWithMasses(movableTargetVertices, movableMasses);
+
+    // Compute relative positions for movable vertices only
+    const p = calculateRelatedPosition(movableCurrentVertices, movableCurrentCentroid);
+    const q = calculateRelatedPosition(movableTargetVertices, movableTargetCentroid);
 
     // Safety check for degenerate configurations
     const pMagnitude = Math.sqrt(p.reduce((sum, v) => sum + v.lengthSq(), 0));
@@ -473,23 +541,23 @@ function enhancedShapeMatching(
         return;
     }
 
-    let newVertices: Vector3[] = [];
+    let movableNewVertices: Vector3[] = [];
 
     try {
         switch (params.deformationType) {
             case 'rotation':
-                newVertices = computeRotationDeformation(p, q, masses, currentCentroid);
+                movableNewVertices = computeRotationDeformation(p, q, movableMasses, movableCurrentCentroid);
                 break;
             case 'linear':
-                newVertices = computeLinearDeformation(p, q, masses, currentCentroid, params.beta);
+                movableNewVertices = computeLinearDeformation(p, q, movableMasses, movableCurrentCentroid, params.beta);
                 break;
             case 'quadratic':
-                newVertices = computeQuadraticDeformation(p, q, masses, currentCentroid, params.beta, params.perturbation);
+                movableNewVertices = computeQuadraticDeformation(p, q, movableMasses, movableCurrentCentroid, params.beta, params.perturbation);
                 break;
         }
 
         // Validate computed vertices
-        const validVertices = newVertices.every(v => 
+        const validVertices = movableNewVertices.every(v => 
             isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
             !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
         );
@@ -499,11 +567,25 @@ function enhancedShapeMatching(
             return;
         }
 
-        // Apply the computed deformation
-        applyDeformation(object, newVertices, params.dampingFactor);
+        // Reconstruct full vertex array with fixed vertices maintaining their positions
+        const newVertices: Vector3[] = new Array(numPoints);
+        let movableIndex = 0;
+
+        for (let i = 0; i < numPoints; i++) {
+            if (fixedVertices.has(i)) {
+                // Keep fixed vertices at their current positions
+                newVertices[i] = currentVertices[i].clone();
+            } else {
+                // Use computed positions for movable vertices
+                newVertices[i] = movableNewVertices[movableIndex];
+                movableIndex++;
+            }
+        }
+
+        // Apply the computed deformation (fixed vertices will be skipped in applyDeformation)
+        applyDeformation(object, newVertices, params.dampingFactor, params.fixedVertices);
     } catch (error) {
         console.error("Error in shape matching:", error);
-        // Don't apply deformation if there's an error
     }
 }
 
@@ -712,7 +794,7 @@ function computeQuadraticDeformation(
     }
 }
 
-function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFactor: number) {
+function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFactor: number, fixedVertices?: Set<number>) {
     object.traverse((child) => {
         if (child instanceof Mesh) {
             const geometry = child.geometry;
@@ -720,7 +802,23 @@ function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFacto
                 const positionAttr = geometry.attributes.position;
                 const vertexCount = Math.min(newVertices.length, positionAttr.count);
                 
+                // Create a new position array for complete refresh
+                const newPositions = new Float32Array(positionAttr.count * 3);
+                
+                // Copy current positions first
+                for (let i = 0; i < positionAttr.count; i++) {
+                    newPositions[i * 3] = positionAttr.getX(i);
+                    newPositions[i * 3 + 1] = positionAttr.getY(i);
+                    newPositions[i * 3 + 2] = positionAttr.getZ(i);
+                }
+                
+                // Update only movable vertices
                 for (let i = 0; i < vertexCount; i++) {
+                    // Skip fixed vertices
+                    if (fixedVertices && fixedVertices.has(i)) {
+                        continue;
+                    }
+                    
                     const currentPos = new Vector3(
                         positionAttr.getX(i),
                         positionAttr.getY(i),
@@ -748,10 +846,19 @@ function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFacto
                         continue;
                     }
                     
-                    // Set the new position
-                    positionAttr.setXYZ(i, dampedPos.x, dampedPos.y, dampedPos.z);
+                    // Update in the new position array
+                    newPositions[i * 3] = dampedPos.x;
+                    newPositions[i * 3 + 1] = dampedPos.y;
+                    newPositions[i * 3 + 2] = dampedPos.z;
                 }
+                
+                // Complete refresh: replace the entire position array
+                positionAttr.array = newPositions;
                 positionAttr.needsUpdate = true;
+                
+                // Force geometry update
+                geometry.attributes.position = positionAttr;
+                geometry.computeBoundingSphere();
             }
         }
     });

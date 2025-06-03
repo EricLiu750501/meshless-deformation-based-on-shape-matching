@@ -88,9 +88,10 @@ interface SimulationParams {
   showTriangles: boolean
   showBoundingBox: boolean
   showFixedPoints: boolean
-  
-  // Control
+    // Control
   pause: boolean
+  autoRestore: boolean // Auto restore to original shape
+  restoreSpeed: number // Speed of auto restoration
   
   // Stats
   fps: number
@@ -106,17 +107,19 @@ const simParams: SimulationParams = {
   beta: 0.3, // Reduced to favor rotation over linear/quadratic
   tau: 0.8,
   perturbation: 1e-4, // Increased for better numerical stability
-  dt: 0.016,  Famplitude: 5, // Reduced force amplitude
+  dt: 0.016,
+  Famplitude: 0.05, // Reduced force amplitude for better control
   pickForce: 5, // Reduced picking force
   hasGravity: false,
   deformationType: 'rotation', // Start with the most stable deformation type
   showWireframe: false,
   showVertexMarkers: false,
   showForceField: false,
-  showTriangles: false,
-  showBoundingBox: false,
+  showTriangles: false,  showBoundingBox: false,
   showFixedPoints: true,
   pause: false,
+  autoRestore: true, // Auto restore to original shape when no forces applied
+  restoreSpeed: 0.05, // Speed of auto restoration
   fps: 0,
   vertices: 0,
   triangles: 0,
@@ -141,7 +144,9 @@ const userInput = {
   draggedObject: null as Object3D | null,
   draggedVertex: -1,
   isPicking: false,
-  pickedVertexIndex: -1
+  pickedVertexIndex: -1,
+  hasActiveForce: false, // Track if forces are being actively applied
+  activeKeys: new Set<string>() // Track which keys are currently pressed
 }
 
 // Statistics display object for GUI
@@ -361,13 +366,13 @@ function setupControls() {
     const initialPos = initialPositions.get(event.object)!
     const masses = initialMasses.get(event.object)
 
-    if (initialVerts && masses && initialPos) {
-      const shapeMatchingParams: ShapeMatchingParams = {
+    if (initialVerts && masses && initialPos) {      const shapeMatchingParams: ShapeMatchingParams = {
         deformationType: simParams.deformationType,
         beta: simParams.beta,
         tau: simParams.tau,
         perturbation: simParams.perturbation,
-        dampingFactor: simParams.dampingFactor
+        dampingFactor: simParams.dampingFactor,
+        fixedVertices: fixedVertices
       }
       
       enhancedShapeMatching(event.object, initialVerts, initialPos, masses, shapeMatchingParams)
@@ -466,10 +471,16 @@ function setupGUI() {
       marker.visible = value
     })
   })
-
   // Shape Matching folder
   const simulationFolder = gui.addFolder('Shape Matching')
   simulationFolder.add(simParams, 'dampingFactor', 0.005, 1).name('Damping Factor')
+  
+  // Auto restoration controls
+  simulationFolder.add(simParams, 'autoRestore').name('Auto Restore').onChange((value: boolean) => {
+    console.log('Auto restore:', value ? 'enabled' : 'disabled')
+  })
+  simulationFolder.add(simParams, 'restoreSpeed', 0.001, 0.2).name('Restore Speed')
+  
   simulationFolder.add({
     applyRandomForce: () => {
       const force = new Vector3(
@@ -530,8 +541,16 @@ function setupKeyboardControls() {
     userInput.isShiftPressed = event.shiftKey
     userInput.isCtrlPressed = event.ctrlKey
 
+    const key = event.key.toLowerCase()
+    
+    // Track force keys
+    if (['i', 'k', 'j', 'l', ' ', 'b'].includes(key)) {
+      userInput.activeKeys.add(key)
+      userInput.hasActiveForce = true
+    }
+
     // Force application keys (based on reference project)
-    switch (event.key.toLowerCase()) {
+    switch (key) {
       case 'i': // Up force
         event.preventDefault()
         applyDirectionalForce(new Vector3(0, simParams.Famplitude, 0))
@@ -568,6 +587,15 @@ function setupKeyboardControls() {
   window.addEventListener('keyup', (event) => {
     userInput.isShiftPressed = event.shiftKey
     userInput.isCtrlPressed = event.ctrlKey
+    
+    const key = event.key.toLowerCase()
+    
+    // Remove from active keys and update force state
+    if (userInput.activeKeys.has(key)) {
+      userInput.activeKeys.delete(key)
+      userInput.hasActiveForce = userInput.activeKeys.size > 0
+    }
+    
     hideForceIndicator()
   })
 }
@@ -634,35 +662,83 @@ function handleCanvasClick(event: MouseEvent) {
 
 function handleVertexFixing(object: Object3D, intersect: any) {
   if (intersect.face && object instanceof Mesh) {
-    const geometry = object.geometry as BufferGeometry
-    const position = geometry.attributes.position
-    
-    // Get the closest vertex to the intersection point
-    const vertices = [intersect.face.a, intersect.face.b, intersect.face.c]
-    let closestVertex = vertices[0]
-    let minDistance = Infinity
-    
-    const intersectionPoint = intersect.point.clone()
-    intersectionPoint.applyMatrix4(object.matrixWorld.clone().invert())
-    
-    for (const vertexIndex of vertices) {
-      const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
-      const distance = vertex.distanceTo(intersectionPoint)
-      if (distance < minDistance) {
-        minDistance = distance
-        closestVertex = vertexIndex
+    try {
+      const geometry = object.geometry as BufferGeometry
+      const position = geometry.attributes.position
+      
+      // Validate geometry and position attribute
+      if (!position || position.count === 0) {
+        console.warn('Invalid geometry or position attribute')
+        return
       }
-    }
-    
-    // Toggle fixed state
-    if (fixedVertices.has(closestVertex)) {
-      fixedVertices.delete(closestVertex)
-      removeFixedVertexMarker(object, closestVertex)
-      console.log(`Vertex ${closestVertex} unfixed`)
-    } else {
-      fixedVertices.add(closestVertex)
-      addFixedVertexMarker(object, closestVertex)
-      console.log(`Vertex ${closestVertex} fixed`)
+      
+      // Force update object's world matrix to ensure accurate transformations
+      object.updateMatrixWorld(true)
+      
+      // Get the closest vertex to the intersection point
+      const vertices = [intersect.face.a, intersect.face.b, intersect.face.c]
+      
+      // Validate face vertex indices
+      const maxIndex = position.count - 1
+      const validVertices = vertices.filter(idx => idx >= 0 && idx <= maxIndex)
+      if (validVertices.length === 0) {
+        console.warn('No valid vertex indices found in face')
+        return
+      }
+      
+      let closestVertex = validVertices[0]
+      let minDistance = Infinity
+      
+      const intersectionPoint = intersect.point.clone()
+      
+      // Safely invert the matrix with error checking
+      const worldMatrixInverse = object.matrixWorld.clone()
+      const determinant = worldMatrixInverse.determinant()
+      if (Math.abs(determinant) < 1e-10) {
+        console.warn('Object matrix is not invertible, using face center approach')
+        // Fallback: use the first vertex of the face
+        closestVertex = validVertices[0]
+      } else {
+        worldMatrixInverse.invert()
+        intersectionPoint.applyMatrix4(worldMatrixInverse)
+        
+        // Find closest vertex with bounds checking
+        for (const vertexIndex of validVertices) {
+          const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
+          
+          // Validate vertex position
+          if (!isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z)) {
+            console.warn(`Invalid vertex position at index ${vertexIndex}`)
+            continue
+          }
+          
+          const distance = vertex.distanceTo(intersectionPoint)
+          if (distance < minDistance) {
+            minDistance = distance
+            closestVertex = vertexIndex
+          }
+        }
+      }
+      
+      // Double-check that closestVertex is valid
+      if (closestVertex < 0 || closestVertex >= position.count) {
+        console.warn(`Invalid vertex index: ${closestVertex}`)
+        return
+      }
+      
+      // Toggle fixed state
+      if (fixedVertices.has(closestVertex)) {
+        fixedVertices.delete(closestVertex)
+        removeFixedVertexMarker(object, closestVertex)
+        console.log(`Vertex ${closestVertex} unfixed`)
+      } else {
+        fixedVertices.add(closestVertex)
+        addFixedVertexMarker(object, closestVertex)
+        console.log(`Vertex ${closestVertex} fixed`)
+      }
+    } catch (error) {
+      console.error('Error in handleVertexFixing:', error)
+      console.warn('Failed to fix/unfix vertex due to error')
     }
   }
 }
@@ -846,20 +922,30 @@ function animate() {
           beta: simParams.beta,
           tau: simParams.tau,
           perturbation: simParams.perturbation,
-          dampingFactor: simParams.dampingFactor
+          dampingFactor: simParams.dampingFactor,
+          fixedVertices: fixedVertices
         }
         
         enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
+        
+        // Force complete mesh refresh after shape matching
+        if (object instanceof Mesh) {
+          const geometry = object.geometry as BufferGeometry
+          geometry.computeBoundingSphere()
+        }
       }
     }
-      // Update fixed vertex markers after deformation
-    updateFixedVertexMarkers()
     
-    // Update bounding box if visible
-    if (simParams.showBoundingBox && boundingBoxHelper && cube) {
-      const box = new Box3().setFromObject(cube)
-      ;(boundingBoxHelper as Box3Helper).box.copy(box)
-    }
+    // Complete refresh of fixed vertex markers after deformation
+    updateFixedVertexMarkers()
+  }
+    // Apply auto restoration when simulation is paused or not active
+  applyAutoRestore()
+    
+  // Update bounding box if visible
+  if (simParams.showBoundingBox && boundingBoxHelper && cube) {
+    const box = new Box3().setFromObject(cube)
+    ;(boundingBoxHelper as Box3Helper).box.copy(box)
   }
 
   // Handle responsive canvas
@@ -924,6 +1010,38 @@ function hideVertexMarkers() {
   vertexMarkers.length = 0
 }
 
+function updateFixedVertexMarkers() {
+  // Complete refresh approach: clear all existing markers and recreate them
+  clearAllFixedVertexMarkers()
+  
+  // Recreate all fixed vertex markers from scratch
+  fixedVertices.forEach(vertexIndex => {
+    // Find the object that contains this vertex
+    for (const object of dragableObjects) {
+      if (object instanceof Mesh) {
+        const geometry = object.geometry as BufferGeometry
+        const position = geometry.attributes.position
+        
+        // Check if this vertex index is valid for this object
+        if (vertexIndex < position.count) {
+          addFixedVertexMarker(object, vertexIndex)
+          break // Found the object, no need to check others
+        }
+      }
+    }
+  })
+}
+
+function clearAllFixedVertexMarkers() {
+  // Remove all existing fixed vertex markers from their parent objects
+  fixedVertexMarkers.forEach(marker => {
+    if (marker.parent) {
+      marker.parent.remove(marker)
+    }
+  })
+  fixedVertexMarkers.length = 0
+}
+
 function applyForceAndSimulate(object: Object3D, force: Vector3) {
   const initialVerts = initialVertices.get(object)
   const initialPos = initialPositions.get(object)
@@ -942,18 +1060,46 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
         const positionAttr = geometry.attributes.position
 
         const numVerticesToAffect = Math.max(1, Math.floor(positionAttr.count * (0.2 + Math.random() * 0.2)))
+        let affectedCount = 0
 
-        for (let i = 0; i < numVerticesToAffect; i++) {
+        // Create a new position array for complete refresh
+        const newPositions = new Float32Array(positionAttr.count * 3)
+        
+        // Copy current positions first
+        for (let i = 0; i < positionAttr.count; i++) {
+          newPositions[i * 3] = positionAttr.getX(i)
+          newPositions[i * 3 + 1] = positionAttr.getY(i)
+          newPositions[i * 3 + 2] = positionAttr.getZ(i)
+        }
+
+        // Try to affect the desired number of vertices, but skip fixed vertices
+        while (affectedCount < numVerticesToAffect) {
           const randomVertexIndex = Math.floor(Math.random() * positionAttr.count)
+          
+          // Skip if this vertex is fixed
+          if (fixedVertices.has(randomVertexIndex)) {
+            continue
+          }
+          
           const vertex = new Vector3().fromBufferAttribute(positionAttr, randomVertexIndex)
 
           const vertexForce = force.clone().multiplyScalar(0.8 + Math.random() * 0.4)
           vertex.add(vertexForce)
 
-          positionAttr.setXYZ(randomVertexIndex, vertex.x, vertex.y, vertex.z)
+          // Update in the new position array
+          newPositions[randomVertexIndex * 3] = vertex.x
+          newPositions[randomVertexIndex * 3 + 1] = vertex.y
+          newPositions[randomVertexIndex * 3 + 2] = vertex.z
+          affectedCount++
         }
 
+        // Complete refresh: replace the entire position array
+        positionAttr.array = newPositions
         positionAttr.needsUpdate = true
+        
+        // Force geometry update
+        geometry.attributes.position = positionAttr
+        geometry.computeBoundingSphere()
       }
     }
   })
@@ -962,12 +1108,18 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
     updateVertexMarkers(object)
   }
 
+  // Complete refresh of fixed vertex markers to prevent residual images
+  updateFixedVertexMarkers()
+
   animation.enabled = true
   animation.play = true
 }
 
 function handleMouseMove(event: MouseEvent) {
   if (userInput.isPicking && userInput.draggedObject && userInput.pickedVertexIndex !== -1) {
+    // Set active force when dragging
+    userInput.hasActiveForce = true
+    
     // Update mouse coordinates
     const rect = canvas.getBoundingClientRect()
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
@@ -1004,13 +1156,13 @@ function handleMouseMove(event: MouseEvent) {
       const initialVerts = initialVertices.get(userInput.draggedObject)
       const initialPos = initialPositions.get(userInput.draggedObject)
       const masses = initialMasses.get(userInput.draggedObject)
-        if (initialVerts && initialPos && masses) {
-        const shapeMatchingParams: ShapeMatchingParams = {
+        if (initialVerts && initialPos && masses) {        const shapeMatchingParams: ShapeMatchingParams = {
           deformationType: simParams.deformationType,
           beta: simParams.beta,
           tau: simParams.tau,
           perturbation: simParams.perturbation,
-          dampingFactor: simParams.dampingFactor
+          dampingFactor: simParams.dampingFactor,
+          fixedVertices: fixedVertices
         }
         
         enhancedShapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, shapeMatchingParams)
@@ -1041,6 +1193,7 @@ function handleMouseUp(_event: MouseEvent) {
   if (userInput.isPicking) {
     userInput.isPicking = false
     userInput.pickedVertexIndex = -1
+    userInput.hasActiveForce = false // Clear active force when releasing mouse
     
     // Restore original shape when mouse is released
     if (userInput.draggedObject) {
@@ -1070,25 +1223,50 @@ function restoreOriginalShape(object: Object3D) {
   }
   
   positionAttr.needsUpdate = true
-  
-  // Update fixed vertex markers to match restored positions
-  updateFixedVertexMarkers()
+    // Update fixed vertex markers to match restored positions
+  updateVertexMarkers(object)
   
   console.log('Original shape restored')
 }
 
-function updateFixedVertexMarkers() {
-  fixedVertexMarkers.forEach(marker => {
-    const vertexIndex = marker.userData.vertexIndex
-    const parentObject = marker.userData.parentObject
-    
-    if (parentObject instanceof Mesh) {
-      const geometry = parentObject.geometry as BufferGeometry
-      const position = geometry.attributes.position
-      const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
+// Auto restoration function - gradually restore shape when no forces are applied
+function applyAutoRestore() {
+  if (!simParams.autoRestore || userInput.hasActiveForce || userInput.isPicking) {
+    return // Skip auto restore if disabled or forces are active
+  }
+
+  dragableObjects.forEach(object => {
+    const originalVertices = initialVertices.get(object)
+    if (!originalVertices || !(object instanceof Mesh)) {
+      return
+    }
+
+    const geometry = object.geometry as BufferGeometry
+    const positionAttr = geometry.attributes.position
+    let hasChanges = false
+
+    // Gradually move each vertex towards its original position
+    for (let i = 0; i < Math.min(originalVertices.length, positionAttr.count); i++) {
+      const currentPos = new Vector3(
+        positionAttr.getX(i),
+        positionAttr.getY(i),
+        positionAttr.getZ(i)
+      )
       
-      // Update marker position to match current vertex position
-      marker.position.copy(vertex)
+      const originalPos = originalVertices[i].clone()
+      
+      // Check if the vertex is significantly displaced
+      const distance = currentPos.distanceTo(originalPos)
+      if (distance > 0.001) { // Only apply restoration if vertex is displaced
+        // Gradually move towards original position
+        const restoredPos = currentPos.lerp(originalPos, simParams.restoreSpeed)
+        positionAttr.setXYZ(i, restoredPos.x, restoredPos.y, restoredPos.z)
+        hasChanges = true
+      }
+    }
+
+    if (hasChanges) {
+      positionAttr.needsUpdate = true
     }
   })
 }
