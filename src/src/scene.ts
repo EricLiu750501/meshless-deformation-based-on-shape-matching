@@ -34,8 +34,8 @@ import Stats from 'stats.js'
 import { toggleFullScreen } from './helpers/fullscreen'
 import { resizeRendererToDisplaySize } from './helpers/responsiveness'
 import { createGridTexture } from './helpers/plane'
-import { getVerticesFromObject, shapeMatching } from './helpers/shapeMatching'
-import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
+import { getVerticesFromObject, enhancedShapeMatching } from './helpers/shapeMatching'
+import type { ShapeMatchingParams } from './helpers/shapeMatching'
 import './style.css'
 
 const CANVAS_ID = 'scene'
@@ -96,16 +96,16 @@ interface SimulationParams {
 
 // Initialize simulation parameters
 const simParams: SimulationParams = {
-  dampingFactor: 0.1,
+  dampingFactor: 0.05, // Reduced for more stability
   Rb: 0.1,
-  beta: 0.8,
+  beta: 0.3, // Reduced to favor rotation over linear/quadratic
   tau: 0.8,
-  perturbation: 0.1,
+  perturbation: 1e-4, // Increased for better numerical stability
   dt: 0.016,
-  Famplitude: 10,
-  pickForce: 10,
+  Famplitude: 5, // Reduced force amplitude
+  pickForce: 5, // Reduced picking force
   hasGravity: false,
-  deformationType: 'linear',
+  deformationType: 'rotation', // Start with the most stable deformation type
   showWireframe: false,
   showVertexMarkers: false,
   showForceField: false,
@@ -351,14 +351,20 @@ function setupControls() {
   dragControls.addEventListener('drag', (event) => {
     if (simParams.showVertexMarkers) {
       updateVertexMarkers(event.object)
-    }
-
-    const initialVerts = initialVertices.get(event.object)
+    }    const initialVerts = initialVertices.get(event.object)
     const initialPos = initialPositions.get(event.object)!
     const masses = initialMasses.get(event.object)
 
     if (initialVerts && masses && initialPos) {
-      shapeMatching(event.object, initialVerts, initialPos, masses, simParams.dampingFactor)
+      const shapeMatchingParams: ShapeMatchingParams = {
+        deformationType: simParams.deformationType,
+        beta: simParams.beta,
+        tau: simParams.tau,
+        perturbation: simParams.perturbation,
+        dampingFactor: simParams.dampingFactor
+      }
+      
+      enhancedShapeMatching(event.object, initialVerts, initialPos, masses, shapeMatchingParams)
       if (simParams.showVertexMarkers) {
         updateVertexMarkers(event.object)
       }
@@ -681,30 +687,36 @@ function addFixedVertexMarker(object: Object3D, vertexIndex: number) {
     const position = geometry.attributes.position
     const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
     
-    // Convert to world coordinates
-    vertex.applyMatrix4(object.matrixWorld)
-    
     // Create red sphere marker for fixed vertex
     const markerGeometry = new SphereGeometry(0.02, 8, 6)
     const markerMaterial = new MeshBasicMaterial({ color: 'red' })
     const marker = new Mesh(markerGeometry, markerMaterial)
-    marker.position.copy(vertex)
-    marker.userData = { vertexIndex, object }
     
-    scene.add(marker)
+    // Set position in local coordinates relative to the object
+    marker.position.copy(vertex)
+    marker.userData = { vertexIndex, parentObject: object }
+    
+    // Add marker as child of the object so it moves with the object
+    object.add(marker)
     fixedVertexMarkers.push(marker)
+    
+    console.log(`Fixed vertex marker added at vertex ${vertexIndex}`)
   }
 }
 
 function removeFixedVertexMarker(object: Object3D, vertexIndex: number) {
   const markerIndex = fixedVertexMarkers.findIndex(marker => 
-    marker.userData.vertexIndex === vertexIndex && marker.userData.object === object
+    marker.userData.vertexIndex === vertexIndex && marker.userData.parentObject === object
   )
   
   if (markerIndex !== -1) {
     const marker = fixedVertexMarkers[markerIndex]
-    scene.remove(marker)
+    // Remove from parent object instead of scene
+    if (marker.parent) {
+      marker.parent.remove(marker)
+    }
     fixedVertexMarkers.splice(markerIndex, 1)
+    console.log(`Fixed vertex marker removed from vertex ${vertexIndex}`)
   }
 }
 
@@ -800,9 +812,7 @@ function animate() {
   stats.begin()
   
   // Update statistics
-  updateStatistics()
-  
-  // Physics simulation
+  updateStatistics()  // Physics simulation
   if (!simParams.pause && animation.enabled && animation.play) {
     for (const object of dragableObjects) {
       const initialVerts = initialVertices.get(object)
@@ -810,9 +820,21 @@ function animate() {
       const masses = initialMasses.get(object)
 
       if (initialVerts && initialPos && masses) {
-        shapeMatching(object, initialVerts, initialPos, masses, simParams.dampingFactor)
+        // Create shape matching parameters from simulation parameters
+        const shapeMatchingParams: ShapeMatchingParams = {
+          deformationType: simParams.deformationType,
+          beta: simParams.beta,
+          tau: simParams.tau,
+          perturbation: simParams.perturbation,
+          dampingFactor: simParams.dampingFactor
+        }
+        
+        enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
       }
     }
+    
+    // Update fixed vertex markers after deformation
+    updateFixedVertexMarkers()
   }
 
   // Handle responsive canvas
@@ -957,9 +979,16 @@ function handleMouseMove(event: MouseEvent) {
       const initialVerts = initialVertices.get(userInput.draggedObject)
       const initialPos = initialPositions.get(userInput.draggedObject)
       const masses = initialMasses.get(userInput.draggedObject)
-      
-      if (initialVerts && initialPos && masses) {
-        shapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, simParams.dampingFactor)
+        if (initialVerts && initialPos && masses) {
+        const shapeMatchingParams: ShapeMatchingParams = {
+          deformationType: simParams.deformationType,
+          beta: simParams.beta,
+          tau: simParams.tau,
+          perturbation: simParams.perturbation,
+          dampingFactor: simParams.dampingFactor
+        }
+        
+        enhancedShapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, shapeMatchingParams)
       }
     }
   }
@@ -969,10 +998,56 @@ function handleMouseUp(_event: MouseEvent) {
   if (userInput.isPicking) {
     userInput.isPicking = false
     userInput.pickedVertexIndex = -1
-    userInput.draggedObject = null
+    
+    // Restore original shape when mouse is released
+    if (userInput.draggedObject) {
+      restoreOriginalShape(userInput.draggedObject)
+      userInput.draggedObject = null
+    }
+    
     cameraControls.enabled = true
-    console.log('Ended vertex picking')
+    console.log('Ended vertex picking and restored original shape')
   }
+}
+
+function restoreOriginalShape(object: Object3D) {
+  const originalVertices = initialVertices.get(object)
+  if (!originalVertices || !(object instanceof Mesh)) {
+    console.warn('No original vertices found for object')
+    return
+  }
+  
+  const geometry = object.geometry as BufferGeometry
+  const positionAttr = geometry.attributes.position
+  
+  // Restore original vertex positions
+  for (let i = 0; i < Math.min(originalVertices.length, positionAttr.count); i++) {
+    const originalVertex = originalVertices[i]
+    positionAttr.setXYZ(i, originalVertex.x, originalVertex.y, originalVertex.z)
+  }
+  
+  positionAttr.needsUpdate = true
+  
+  // Update fixed vertex markers to match restored positions
+  updateFixedVertexMarkers()
+  
+  console.log('Original shape restored')
+}
+
+function updateFixedVertexMarkers() {
+  fixedVertexMarkers.forEach(marker => {
+    const vertexIndex = marker.userData.vertexIndex
+    const parentObject = marker.userData.parentObject
+    
+    if (parentObject instanceof Mesh) {
+      const geometry = parentObject.geometry as BufferGeometry
+      const position = geometry.attributes.position
+      const vertex = new Vector3().fromBufferAttribute(position, vertexIndex)
+      
+      // Update marker position to match current vertex position
+      marker.position.copy(vertex)
+    }
+  })
 }
 
 export { gui }

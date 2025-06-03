@@ -14,6 +14,18 @@
 
 import {Vector3, Object3D, Mesh, BufferGeometry, Matrix3, BufferAttribute} from 'three';
 
+// Deformation types
+export type DeformationType = 'rotation' | 'linear' | 'quadratic';
+
+// Interface for simulation parameters
+export interface ShapeMatchingParams {
+  deformationType: DeformationType;
+  beta: number;
+  tau: number;
+  perturbation: number;
+  dampingFactor: number;
+}
+
 
 // 提取頂點
 function getVerticesFromObject(object: Object3D) : Vector3[] {
@@ -118,9 +130,7 @@ function calculateA_pq(p:Vector3[], q:Vector3[], masses:number[]):Matrix3 {
             qi.x * pi.x, qi.x * pi.y, qi.x * pi.z,
             qi.y * pi.x, qi.y * pi.y, qi.y * pi.z,
             qi.z * pi.x, qi.z * pi.y, qi.z * pi.z
-        ).multiplyScalar(m);
-        A_pq.elements.forEach((val, idx) => {
-            val
+        ).multiplyScalar(m);        A_pq.elements.forEach((_, idx) => {
             A_pq.elements[idx] += outerProduct.elements[idx];
         });
     }
@@ -139,6 +149,201 @@ function addMatrix3(a: Matrix3, b: Matrix3): Matrix3 {
     }
 
     return result;
+}
+
+/**
+ * Calculate quadratic terms for each vertex
+ * @param q - relative positions from centroid
+ * @returns Array of 9-element vectors containing [x, y, z, x², y², z², xy, yz, zx]
+ */
+function calculateQuadraticTerms(q: Vector3[]): number[][] {
+    const quadraticTerms: number[][] = [];
+    
+    for (const qi of q) {
+        const qTilde = [
+            qi.x, qi.y, qi.z,                    // linear terms
+            qi.x * qi.x, qi.y * qi.y, qi.z * qi.z, // quadratic terms
+            qi.x * qi.y, qi.y * qi.z, qi.z * qi.x  // cross terms
+        ];
+        quadraticTerms.push(qTilde);
+    }
+    
+    return quadraticTerms;
+}
+
+/**
+ * Create 9x9 matrix for quadratic deformation
+ */
+function calculateAqqInvQuadratic(qQuadratic: number[][], masses: number[], perturbation: number = 1e-6): number[][] {
+    // Initialize 9x9 matrix
+    const Aqq = Array(9).fill(0).map(() => Array(9).fill(0));
+    
+    // Build Aqq matrix
+    for (let i = 0; i < qQuadratic.length; i++) {
+        const qi = qQuadratic[i];
+        const mass = masses[i];
+        
+        for (let j = 0; j < 9; j++) {
+            for (let k = 0; k < 9; k++) {
+                Aqq[j][k] += mass * qi[j] * qi[k];
+            }
+        }
+    }
+    
+    // Add regularization (perturbation to diagonal)
+    for (let i = 0; i < 9; i++) {
+        Aqq[i][i] += perturbation;
+    }
+    
+    // Simple matrix inversion for 9x9 (using Gaussian elimination)
+    return invertMatrix9x9(Aqq);
+}
+
+/**
+ * Simple 9x9 matrix inversion using Gaussian elimination
+ */
+function invertMatrix9x9(matrix: number[][]): number[][] {
+    const n = 9;
+    const augmented = matrix.map((row, i) => [
+        ...row,
+        ...Array(n).fill(0).map((_, j) => i === j ? 1 : 0)
+    ]);
+    
+    // Forward elimination
+    for (let i = 0; i < n; i++) {
+        // Find pivot
+        let maxRow = i;
+        for (let k = i + 1; k < n; k++) {
+            if (Math.abs(augmented[k][i]) > Math.abs(augmented[maxRow][i])) {
+                maxRow = k;
+            }
+        }
+        
+        // Swap rows
+        [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]];
+        
+        // Make diagonal element 1
+        const pivot = augmented[i][i];
+        if (Math.abs(pivot) < 1e-10) continue; // Skip singular matrix
+        
+        for (let k = 0; k < 2 * n; k++) {
+            augmented[i][k] /= pivot;
+        }
+        
+        // Eliminate column
+        for (let k = 0; k < n; k++) {
+            if (k !== i) {
+                const factor = augmented[k][i];
+                for (let j = 0; j < 2 * n; j++) {
+                    augmented[k][j] -= factor * augmented[i][j];
+                }
+            }
+        }
+    }
+    
+    // Extract inverse matrix
+    return augmented.map(row => row.slice(n));
+}
+
+/**
+ * Calculate ApqTilde (3x9 matrix) for quadratic deformation
+ */
+function calculateApqTilde(p: Vector3[], qQuadratic: number[][], masses: number[]): number[][] {
+    const ApqTilde = Array(3).fill(0).map(() => Array(9).fill(0));
+    
+    for (let i = 0; i < p.length; i++) {
+        const pi = p[i];
+        const qTilde = qQuadratic[i];
+        const mass = masses[i];
+        
+        // ApqTilde += mass * pi * qTilde^T
+        ApqTilde[0][0] += mass * pi.x * qTilde[0]; // x * x
+        ApqTilde[0][1] += mass * pi.x * qTilde[1]; // x * y
+        ApqTilde[0][2] += mass * pi.x * qTilde[2]; // x * z
+        ApqTilde[0][3] += mass * pi.x * qTilde[3]; // x * x²
+        ApqTilde[0][4] += mass * pi.x * qTilde[4]; // x * y²
+        ApqTilde[0][5] += mass * pi.x * qTilde[5]; // x * z²
+        ApqTilde[0][6] += mass * pi.x * qTilde[6]; // x * xy
+        ApqTilde[0][7] += mass * pi.x * qTilde[7]; // x * yz
+        ApqTilde[0][8] += mass * pi.x * qTilde[8]; // x * zx
+        
+        ApqTilde[1][0] += mass * pi.y * qTilde[0]; // y * x
+        ApqTilde[1][1] += mass * pi.y * qTilde[1]; // y * y
+        ApqTilde[1][2] += mass * pi.y * qTilde[2]; // y * z
+        ApqTilde[1][3] += mass * pi.y * qTilde[3]; // y * x²
+        ApqTilde[1][4] += mass * pi.y * qTilde[4]; // y * y²
+        ApqTilde[1][5] += mass * pi.y * qTilde[5]; // y * z²
+        ApqTilde[1][6] += mass * pi.y * qTilde[6]; // y * xy
+        ApqTilde[1][7] += mass * pi.y * qTilde[7]; // y * yz
+        ApqTilde[1][8] += mass * pi.y * qTilde[8]; // y * zx
+        
+        ApqTilde[2][0] += mass * pi.z * qTilde[0]; // z * x
+        ApqTilde[2][1] += mass * pi.z * qTilde[1]; // z * y
+        ApqTilde[2][2] += mass * pi.z * qTilde[2]; // z * z
+        ApqTilde[2][3] += mass * pi.z * qTilde[3]; // z * x²
+        ApqTilde[2][4] += mass * pi.z * qTilde[4]; // z * y²
+        ApqTilde[2][5] += mass * pi.z * qTilde[5]; // z * z²
+        ApqTilde[2][6] += mass * pi.z * qTilde[6]; // z * xy
+        ApqTilde[2][7] += mass * pi.z * qTilde[7]; // z * yz
+        ApqTilde[2][8] += mass * pi.z * qTilde[8]; // z * zx
+    }
+    
+    return ApqTilde;
+}
+
+/**
+ * Matrix multiplication for 3x9 and 9x9 matrices
+ */
+function multiplyMatrix3x9_9x9(A: number[][], B: number[][]): number[][] {
+    const result = Array(3).fill(0).map(() => Array(9).fill(0));
+    
+    for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 9; j++) {
+            for (let k = 0; k < 9; k++) {
+                result[i][j] += A[i][k] * B[k][j];
+            }
+        }
+    }
+    
+    return result;
+}
+
+/**
+ * Matrix multiplication for 3x9 and 9xN matrices (where N is number of vertices)
+ */
+/**
+ * Improved rotation extraction using SVD approximation
+ */
+function extractRotationSVD(Apq: Matrix3): Matrix3 {
+    // Use iterative method to approximate SVD for better rotation extraction
+    let R = Apq.clone();
+    const maxIterations = 10;
+    
+    for (let iter = 0; iter < maxIterations; iter++) {
+        const Rt = R.clone().transpose();
+        const RRt = new Matrix3().multiplyMatrices(R, Rt);
+        
+        // Calculate (R*R^T)^(-1/2) using eigenvalue decomposition approximation
+        const trace = RRt.elements[0] + RRt.elements[4] + RRt.elements[8];
+        const scale = Math.pow(Math.abs(trace / 3), -0.5);
+        
+        const RRtInvSqrt = RRt.clone().multiplyScalar(scale);
+        
+        const newR = new Matrix3().multiplyMatrices(R, RRtInvSqrt);
+        
+        // Check convergence
+        const diff = new Matrix3();
+        for (let i = 0; i < 9; i++) {
+            diff.elements[i] = newR.elements[i] - R.elements[i];
+        }
+        const diffNorm = Math.sqrt(diff.elements.reduce((sum: number, val: number) => sum + val * val, 0));
+        
+        R = newR;
+        
+        if (diffNorm < 1e-6) break;
+    }
+    
+    return R;
 }
 
 
@@ -165,13 +370,6 @@ function extractRotation(Apq: Matrix3): Matrix3 {
 function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentroid: Vector3, masses: number[], dampingFactor: number = 0.1) {
     const currentVertices = getAllWorldVertices(object);
     const numPoints = currentVertices.length;
-
-    // console.group("shapeMatching");
-    // console.log("currentVertices", currentVertices);
-    // console.log("currentCentroid", object.position);
-    // console.log("targetVertices", targetVertices);
-    // console.log("targetCentroid", targetCentroid);
-    // console.groupEnd();
 
     if (targetVertices.length !== numPoints || masses.length !== numPoints) {
         throw new Error("Vertex count mismatch");
@@ -227,7 +425,339 @@ function shapeMatching(object: Object3D, targetVertices: Vector3[], targetCentro
     });
 }
 
+function enhancedShapeMatching(
+    object: Object3D, 
+    targetVertices: Vector3[], 
+    targetCentroid: Vector3, 
+    masses: number[], 
+    params: ShapeMatchingParams
+) {
+    const currentVertices = getAllWorldVertices(object);
+    const numPoints = currentVertices.length;
+
+    if (targetVertices.length !== numPoints || masses.length !== numPoints) {
+        console.error("Vertex count mismatch:", {
+            current: numPoints,
+            target: targetVertices.length,
+            masses: masses.length
+        });
+        return; // Don't apply deformation if there's a mismatch
+    }
+
+    // Add safety checks
+    if (numPoints === 0) {
+        console.warn("No vertices found for shape matching");
+        return;
+    }
+
+    // Check for invalid masses
+    const validMasses = masses.every(m => m > 0 && isFinite(m));
+    if (!validMasses) {
+        console.warn("Invalid masses detected, using default values");
+        masses = masses.map(() => 1.0); // Use unit masses as fallback
+    }
+
+    // Step 1: Compute centroids
+    const currentCentroid = object.position.clone();
+
+    // Step 2: Compute relative positions
+    const p = calculateRelatedPosition(currentVertices, currentCentroid);
+    const q = calculateRelatedPosition(targetVertices, targetCentroid);
+
+    // Safety check for degenerate configurations
+    const pMagnitude = Math.sqrt(p.reduce((sum, v) => sum + v.lengthSq(), 0));
+    const qMagnitude = Math.sqrt(q.reduce((sum, v) => sum + v.lengthSq(), 0));
+    
+    if (pMagnitude < 1e-10 || qMagnitude < 1e-10) {
+        console.warn("Degenerate configuration detected, skipping deformation");
+        return;
+    }
+
+    let newVertices: Vector3[] = [];
+
+    try {
+        switch (params.deformationType) {
+            case 'rotation':
+                newVertices = computeRotationDeformation(p, q, masses, currentCentroid);
+                break;
+            case 'linear':
+                newVertices = computeLinearDeformation(p, q, masses, currentCentroid, params.beta);
+                break;
+            case 'quadratic':
+                newVertices = computeQuadraticDeformation(p, q, masses, currentCentroid, params.beta, params.perturbation);
+                break;
+        }
+
+        // Validate computed vertices
+        const validVertices = newVertices.every(v => 
+            isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+            !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+        );
+
+        if (!validVertices) {
+            console.error("Invalid vertices computed, skipping deformation");
+            return;
+        }
+
+        // Apply the computed deformation
+        applyDeformation(object, newVertices, params.dampingFactor);
+    } catch (error) {
+        console.error("Error in shape matching:", error);
+        // Don't apply deformation if there's an error
+    }
+}
+
+function computeRotationDeformation(
+    p: Vector3[], 
+    q: Vector3[], 
+    masses: number[], 
+    currentCentroid: Vector3
+): Vector3[] {
+    // Compute A_pq matrix
+    const A_pq = calculateA_pq(p, q, masses);
+    
+    // Extract pure rotation using SVD approximation
+    const R = extractRotationSVD(A_pq);
+    
+    // Apply rotation to target shape
+    const newVertices: Vector3[] = [];
+    for (let i = 0; i < q.length; i++) {
+        const rotated = q[i].clone().applyMatrix3(R);
+        const newPos = rotated.add(currentCentroid);
+        newVertices.push(newPos);
+    }
+    
+    return newVertices;
+}
+
+function computeLinearDeformation(
+    p: Vector3[], 
+    q: Vector3[], 
+    masses: number[], 
+    currentCentroid: Vector3, 
+    beta: number
+): Vector3[] {
+    // Compute A_pq matrix
+    const A_pq = calculateA_pq(p, q, masses);
+    
+    // Extract rotation
+    const R = extractRotationSVD(A_pq);
+    
+    // Compute Aqq inverse for linear transformation
+    const Aqq = new Matrix3();
+    for (let i = 0; i < q.length; i++) {
+        const qi = q[i];
+        const mass = masses[i];
+        const outerProduct = new Matrix3().set(
+            qi.x * qi.x, qi.x * qi.y, qi.x * qi.z,
+            qi.y * qi.x, qi.y * qi.y, qi.y * qi.z,
+            qi.z * qi.x, qi.z * qi.y, qi.z * qi.z
+        ).multiplyScalar(mass);
+        
+        Aqq.elements.forEach((_, idx) => {
+            Aqq.elements[idx] += outerProduct.elements[idx];
+        });
+    }
+    
+    // Add small regularization to prevent singular matrix
+    const regularization = 1e-6;
+    Aqq.elements[0] += regularization; // Add to diagonal
+    Aqq.elements[4] += regularization;
+    Aqq.elements[8] += regularization;
+    
+    // Check if matrix is invertible
+    const det = Aqq.determinant();
+    if (Math.abs(det) < 1e-10) {
+        console.warn("Singular Aqq matrix detected, using rotation only");
+        // Fall back to rotation-only deformation
+        const newVertices: Vector3[] = [];
+        for (let i = 0; i < q.length; i++) {
+            const rotated = q[i].clone().applyMatrix3(R);
+            const newPos = rotated.add(currentCentroid);
+            newVertices.push(newPos);
+        }
+        return newVertices;
+    }
+    
+    // Compute linear transformation matrix A
+    const A = new Matrix3().multiplyMatrices(A_pq, Aqq.clone().invert());
+    
+    // Volume preservation - check for valid volume
+    const volume = A.determinant();
+    if (Math.abs(volume) > 1e-10) {
+        A.multiplyScalar(Math.pow(Math.abs(volume), -1/3));
+    }
+    
+    // Validate transformation matrix
+    const validMatrix = A.elements.every(val => isFinite(val) && !isNaN(val));
+    if (!validMatrix) {
+        console.warn("Invalid transformation matrix, using rotation only");
+        // Fall back to rotation-only deformation
+        const newVertices: Vector3[] = [];
+        for (let i = 0; i < q.length; i++) {
+            const rotated = q[i].clone().applyMatrix3(R);
+            const newPos = rotated.add(currentCentroid);
+            newVertices.push(newPos);
+        }
+        return newVertices;
+    }
+    
+    // Blend between rotation and linear transformation
+    const T = new Matrix3();
+    for (let i = 0; i < 9; i++) {
+        T.elements[i] = beta * A.elements[i] + (1 - beta) * R.elements[i];
+    }
+    
+    // Apply transformation
+    const newVertices: Vector3[] = [];
+    for (let i = 0; i < q.length; i++) {
+        const transformed = q[i].clone().applyMatrix3(T);
+        const newPos = transformed.add(currentCentroid);
+        newVertices.push(newPos);
+    }
+    
+    return newVertices;
+}
+
+function computeQuadraticDeformation(
+    p: Vector3[], 
+    q: Vector3[], 
+    masses: number[], 
+    currentCentroid: Vector3, 
+    beta: number, 
+    perturbation: number
+): Vector3[] {
+    try {
+        // Calculate quadratic terms for target configuration
+        const qQuadratic = calculateQuadraticTerms(q);
+        
+        // Calculate ApqTilde (3x9 matrix)
+        const ApqTilde = calculateApqTilde(p, qQuadratic, masses);
+        
+        // Calculate AqqInv for quadratic terms
+        const AqqInvQuadratic = calculateAqqInvQuadratic(qQuadratic, masses, perturbation);
+        
+        // Validate AqqInvQuadratic
+        const validInverse = AqqInvQuadratic.every(row => 
+            row.every(val => isFinite(val) && !isNaN(val))
+        );
+        
+        if (!validInverse) {
+            console.warn("Invalid quadratic inverse matrix, falling back to linear deformation");
+            return computeLinearDeformation(p, q, masses, currentCentroid, beta);
+        }
+        
+        // Compute linear transformation matrix for comparison
+        const A_pq = calculateA_pq(p, q, masses);
+        const R = extractRotationSVD(A_pq);
+        
+        // Create Rtilde (3x9) - rotation extended to quadratic space
+        const Rtilde = Array(3).fill(0).map(() => Array(9).fill(0));
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                Rtilde[i][j] = R.elements[i * 3 + j];
+            }
+        }
+        
+        // Compute Atilde = ApqTilde * AqqInvQuadratic
+        const Atilde = multiplyMatrix3x9_9x9(ApqTilde, AqqInvQuadratic);
+        
+        // Validate Atilde
+        const validAtilde = Atilde.every(row => 
+            row.every(val => isFinite(val) && !isNaN(val))
+        );
+        
+        if (!validAtilde) {
+            console.warn("Invalid quadratic transformation matrix, falling back to linear deformation");
+            return computeLinearDeformation(p, q, masses, currentCentroid, beta);
+        }
+        
+        // Blend between quadratic and rotation transformation
+        const T = Array(3).fill(0).map(() => Array(9).fill(0));
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 9; j++) {
+                T[i][j] = beta * Atilde[i][j] + (1 - beta) * Rtilde[i][j];
+            }
+        }
+        
+        // Apply transformation to quadratic terms
+        const transformedVertices: Vector3[] = [];
+        for (let i = 0; i < qQuadratic.length; i++) {
+            const vertex = new Vector3();
+            
+            // Apply transformation T to qTilde[i]
+            for (let j = 0; j < 9; j++) {
+                vertex.x += T[0][j] * qQuadratic[i][j];
+                vertex.y += T[1][j] * qQuadratic[i][j];
+                vertex.z += T[2][j] * qQuadratic[i][j];
+            }
+            
+            // Validate the computed vertex
+            if (!isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z) ||
+                isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
+                console.warn("Invalid vertex computed in quadratic deformation, falling back to linear");
+                return computeLinearDeformation(p, q, masses, currentCentroid, beta);
+            }
+            
+            // Add current centroid
+            vertex.add(currentCentroid);
+            transformedVertices.push(vertex);
+        }
+        
+        return transformedVertices;
+    } catch (error) {
+        console.error("Error in quadratic deformation:", error);
+        console.warn("Falling back to linear deformation");
+        return computeLinearDeformation(p, q, masses, currentCentroid, beta);
+    }
+}
+
+function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFactor: number) {
+    object.traverse((child) => {
+        if (child instanceof Mesh) {
+            const geometry = child.geometry;
+            if (geometry instanceof BufferGeometry) {
+                const positionAttr = geometry.attributes.position;
+                const vertexCount = Math.min(newVertices.length, positionAttr.count);
+                
+                for (let i = 0; i < vertexCount; i++) {
+                    const currentPos = new Vector3(
+                        positionAttr.getX(i),
+                        positionAttr.getY(i),
+                        positionAttr.getZ(i)
+                    );
+                    
+                    // Convert new vertex from world to local space
+                    const targetPos = newVertices[i].clone();
+                    child.worldToLocal(targetPos);
+                    
+                    // Validate target position
+                    if (!isFinite(targetPos.x) || !isFinite(targetPos.y) || !isFinite(targetPos.z) ||
+                        isNaN(targetPos.x) || isNaN(targetPos.y) || isNaN(targetPos.z)) {
+                        console.warn(`Invalid target position for vertex ${i}, skipping`);
+                        continue;
+                    }
+                    
+                    // Apply damping: interpolate between current and target position
+                    const dampedPos = currentPos.lerp(targetPos, Math.max(0, Math.min(1, dampingFactor)));
+                    
+                    // Validate damped position
+                    if (!isFinite(dampedPos.x) || !isFinite(dampedPos.y) || !isFinite(dampedPos.z) ||
+                        isNaN(dampedPos.x) || isNaN(dampedPos.y) || isNaN(dampedPos.z)) {
+                        console.warn(`Invalid damped position for vertex ${i}, skipping`);
+                        continue;
+                    }
+                    
+                    // Set the new position
+                    positionAttr.setXYZ(i, dampedPos.x, dampedPos.y, dampedPos.z);
+                }
+                positionAttr.needsUpdate = true;
+            }
+        }
+    });
+}
 
 
 
-export { getVerticesFromObject, shapeMatching};
+
+export { getVerticesFromObject, shapeMatching, enhancedShapeMatching };
