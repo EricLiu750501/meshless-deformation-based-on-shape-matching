@@ -1,6 +1,8 @@
-// vite.config.ts
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  base: '/meshless-deformation-based-on-shape-matching/', // <--- 改成你的 repo 名稱
+  base: '/meshless-deformation-based-on-shape-matching/',
+  server: {
+    allowedHosts: ['cg.111703037.xyz', 'localhost']
+  }
 })
