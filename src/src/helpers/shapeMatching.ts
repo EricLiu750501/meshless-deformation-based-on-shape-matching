@@ -1679,7 +1679,7 @@ export function integratePhysics(
   const numVertices = positions.length
   const fixedVertices = params.fixedVertices || new Set<number>()
   
-  // 1. 計算形狀匹配目標位置 (同 C++ 中的 g)
+  // 1. 計算形狀匹配目標位置
   const movablePositions: Vector3[] = []
   const movableRestPositions: Vector3[] = []
   const movableMasses: number[] = []
