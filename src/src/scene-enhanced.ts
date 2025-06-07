@@ -263,23 +263,9 @@ function init() {
     // Add cube to dragable objects array
     dragableObjects.push(cube)
     
-    // Add initial small perturbation to trigger physics simulation
-    // This helps demonstrate that the deformation system is working
-    setTimeout(() => {
-      const physicsState = physicsStates.get(cube)
-      if (physicsState) {
-        // Apply small random forces to some vertices to create initial deformation
-        for (let i = 0; i < Math.min(3, physicsState.forces.length); i++) {
-          const randomForce = new Vector3(
-            (Math.random() - 0.5) * 0.5,
-            (Math.random() - 0.5) * 0.5,
-            (Math.random() - 0.5) * 0.5
-          )
-          physicsState.forces[i].add(randomForce)
-        }
-        console.log('Applied initial perturbation forces to demonstrate deformation')
-      }
-    }, 1000) // Wait 1 second after initialization
+    // REMOVED: Initial perturbation that was causing unwanted oscillation
+    // The physics system should start in a stable state without artificial disturbances    // REMOVED: Initial perturbation that was causing unwanted oscillation
+    // The physics system should start in a stable state without artificial disturbances
 
     // Ground plane
     const gridTexture = createGridTexture()
