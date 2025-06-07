@@ -73,11 +73,9 @@ interface SimulationParams {
   tau: number // Elasticity
   perturbation: number
   dt: number // Time step
-  
-  // Forces
+    // Forces
   Famplitude: number // Force amplitude
   pickForce: number // Picking force
-  hasGravity: boolean
   
   // Deformation type
   deformationType: 'rotation' | 'linear' | 'quadratic'
@@ -105,16 +103,15 @@ const simParams: SimulationParams = {
   dampingFactor: 0.05, // Reduced for more stability
   Rb: 0.1,
   beta: 0.3, // Reduced to favor rotation over linear/quadratic
-  tau: 0.8,
-  perturbation: 1e-4, // Increased for better numerical stability
-  dt: 0.016,  Famplitude: 0.1, // Increased slightly for better effect with scaled objects
+  tau: 0.8,  perturbation: 1e-4, // Increased for better numerical stability
+  dt: 0.016,
+  Famplitude: 0.1, // Increased slightly for better effect with scaled objects
   pickForce: 5, // Reduced picking force
-  hasGravity: false,
   deformationType: 'rotation', // Start with the most stable deformation type
   showWireframe: false,
-  showVertexMarkers: false,
-  showForceField: false,
-  showTriangles: false,  showBoundingBox: false,
+  showVertexMarkers: false,  showForceField: false,
+  showTriangles: false,
+  showBoundingBox: false,
   showFixedPoints: true,
   pause: false,
   autoRestore: true, // Auto restore to original shape when no forces applied
@@ -459,7 +456,6 @@ function setupGUI() {
       loadPresetOBJ('/cube.obj')
     }
   }, 'loadCubeOBJ').name('Load Cube OBJ')
-
   // Physics folder
   const physicsFolder = gui.addFolder('Physics')
   physicsFolder.add(simParams, 'Rb', 0, 10).name('Velocity Damping')
@@ -469,8 +465,8 @@ function setupGUI() {
   physicsFolder.add(simParams, 'beta', 0, 1).name('Beta (Linear/Rotation Mix)')
   physicsFolder.add(simParams, 'perturbation', 0, 0.1).name('Regularization')
   physicsFolder.add(simParams, 'dt', 0.001, 1.0).name('Time Step')
-  physicsFolder.add(simParams, 'hasGravity').name('Activate Gravity')
   physicsFolder.add(simParams, 'pause').name('Pause')
+  
   // Deformation Types folder
   const deformationFolder = gui.addFolder('Deformation Types')
   const deformationTypes = {
@@ -478,7 +474,9 @@ function setupGUI() {
     'Linear': 'linear' as const,
     'Quadratic': 'quadratic' as const
   }
-  deformationFolder.add(simParams, 'deformationType', deformationTypes).name('Type')  // Visualization folder
+  deformationFolder.add(simParams, 'deformationType', deformationTypes).name('Type')
+  
+  // Visualization folder
   const visualizationFolder = gui.addFolder('Visualization')
   visualizationFolder.add(simParams, 'showWireframe').name('Show Wireframe').onChange((value: boolean) => {
     // Apply to all dragable objects, not just cube
@@ -1256,6 +1254,12 @@ function animate() {
     
     if (hasActiveDeformation) {
       for (const object of dragableObjects) {
+        // CRITICAL: Validate object state before shape matching
+        if (!validateObjectState(object)) {
+          console.warn("Object state validation failed, skipping physics simulation");
+          continue;
+        }
+        
         const initialVerts = initialVertices.get(object)
         const initialPos = initialPositions.get(object)
         const masses = initialMasses.get(object)
@@ -1270,8 +1274,14 @@ function animate() {
             dampingFactor: simParams.dampingFactor,
             fixedVertices: fixedVertices
           }
+            enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
           
-          enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
+          // CRITICAL: Validate object state after shape matching
+          if (!validateObjectState(object)) {
+            console.warn("Object state corrupted after shape matching, resetting to safe state");
+            // Reset geometry to initial state if corrupted
+            resetObjectToSafeState(object, initialVerts, initialPos);
+          }
           
           // Force complete mesh refresh after shape matching
           object.traverse((child) => {
@@ -1422,6 +1432,99 @@ function updateObjectStatistics(object: Object3D, objectName: string) {
   }
 }
 
+// Validate object state to prevent infinite coordinates
+function validateObjectState(object: Object3D): boolean {
+  try {
+    // Check object properties
+    if (!object || !object.position || !object.scale || !object.rotation) {
+      console.warn("Object missing essential properties");
+      return false;
+    }
+    
+    // Check position
+    if (!isFinite(object.position.x) || !isFinite(object.position.y) || !isFinite(object.position.z) ||
+        isNaN(object.position.x) || isNaN(object.position.y) || isNaN(object.position.z)) {
+      console.warn("Object has invalid position:", object.position);
+      object.position.set(0, 0.5, 0); // Reset to safe position
+      return false;
+    }
+    
+    // Check scale
+    if (!isFinite(object.scale.x) || !isFinite(object.scale.y) || !isFinite(object.scale.z) ||
+        isNaN(object.scale.x) || isNaN(object.scale.y) || isNaN(object.scale.z) ||
+        object.scale.x <= 0 || object.scale.y <= 0 || object.scale.z <= 0) {
+      console.warn("Object has invalid scale:", object.scale);
+      object.scale.set(1, 1, 1); // Reset to safe scale
+      return false;
+    }
+    
+    // Check rotation
+    if (!isFinite(object.rotation.x) || !isFinite(object.rotation.y) || !isFinite(object.rotation.z) ||
+        isNaN(object.rotation.x) || isNaN(object.rotation.y) || isNaN(object.rotation.z)) {
+      console.warn("Object has invalid rotation:", object.rotation);
+      object.rotation.set(0, 0, 0); // Reset to safe rotation
+      return false;
+    }
+    
+    // Check matrix
+    object.updateMatrixWorld(true);
+    const matrix = object.matrixWorld;
+    const hasInvalidMatrix = matrix.elements.some(element => 
+      !isFinite(element) || isNaN(element) || element === Infinity || element === -Infinity
+    );
+    
+    if (hasInvalidMatrix) {
+      console.warn("Object has invalid matrix, resetting to identity");
+      object.position.set(0, 0.5, 0);
+      object.rotation.set(0, 0, 0);
+      object.scale.set(1, 1, 1);
+      object.updateMatrixWorld(true);
+      return false;
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("Error validating object state:", error);
+    return false;
+  }
+}
+
+// Reset object to safe state if corrupted
+function resetObjectToSafeState(object: Object3D, initialVerts: Vector3[], initialPos: Vector3) {
+  try {
+    console.log("Resetting object to safe state");
+    
+    // Reset transform
+    object.position.copy(initialPos);
+    object.rotation.set(0, 0, 0);
+    object.scale.set(1, 1, 1);
+    object.updateMatrixWorld(true);
+    
+    // Reset geometry vertices to initial state
+    let vertexIndex = 0;
+    object.traverse((child) => {
+      if (child instanceof Mesh) {
+        const geometry = child.geometry as BufferGeometry;
+        const positionAttr = geometry.attributes.position;
+        
+        for (let i = 0; i < positionAttr.count && vertexIndex < initialVerts.length; i++) {
+          const vertex = initialVerts[vertexIndex];
+          positionAttr.setXYZ(i, vertex.x, vertex.y, vertex.z);
+          vertexIndex++;
+        }
+        
+        positionAttr.needsUpdate = true;
+        geometry.computeBoundingSphere();
+        geometry.computeVertexNormals();
+      }
+    });
+    
+    console.log("Object reset to safe state completed");
+  } catch (error) {
+    console.error("Error resetting object to safe state:", error);
+  }
+}
+
 function updateStatistics() {
   statsDisplay.fps = Math.round(1 / clock.getDelta()).toString()
   
@@ -1441,9 +1544,31 @@ function updateStatistics() {
         console.warn("Object with invalid transform found, skipping vertex count");
         return total;
       }
-      
-      try {
+        try {
         const vertices = getVerticesFromObject(obj);
+        
+        // CRITICAL: Check if any vertices are invalid and fix immediately
+        const hasInvalidVertices = vertices.some(v => 
+          !isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z) ||
+          isNaN(v.x) || isNaN(v.y) || isNaN(v.z)
+        );
+        
+        if (hasInvalidVertices) {
+          console.warn("Invalid vertices detected in object, attempting to fix");
+          const initialVerts = initialVertices.get(obj);
+          const initialPos = initialPositions.get(obj);
+          
+          if (initialVerts && initialPos) {
+            resetObjectToSafeState(obj, initialVerts, initialPos);
+            // Re-get vertices after reset
+            const fixedVertices = getVerticesFromObject(obj);
+            return total + fixedVertices.length;
+          } else {
+            console.warn("No initial data available for object reset, skipping");
+            return total;
+          }
+        }
+        
         return total + vertices.length;
       } catch (error) {
         console.error("Error getting vertices from object:", error);

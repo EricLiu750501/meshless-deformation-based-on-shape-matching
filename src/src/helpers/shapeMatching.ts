@@ -1079,16 +1079,15 @@ function computeLinearDeformation(
     
     // Extract rotation
     const R = extractRotationSVD(A_pq);
-    
-    // Compute Aqq inverse for linear transformation
+      // Compute Aqq inverse for linear transformation
     const Aqq = new Matrix3();
     for (let i = 0; i < q.length; i++) {
         const qi = q[i];
         const mass = masses[i];
         const outerProduct = new Matrix3().set(
             qi.x * qi.x, qi.x * qi.y, qi.x * qi.z,
-            qi.y * pi.x, qi.y * pi.y, qi.y * pi.z,
-            qi.z * pi.x, qi.z * pi.y, qi.z * pi.z
+            qi.y * qi.x, qi.y * qi.y, qi.y * qi.z,
+            qi.z * qi.x, qi.z * qi.y, qi.z * qi.z
         ).multiplyScalar(mass);
         
         Aqq.elements.forEach((_, idx) => {
