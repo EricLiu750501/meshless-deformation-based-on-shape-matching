@@ -15,15 +15,18 @@ import {
   PointLight,
   PointLightHelper,
   Scene,
+  SphereGeometry,
   WebGLRenderer,
   MeshBasicMaterial,
   DoubleSide,
   RepeatWrapping,
   Object3D,
   Vector3,
+  Vector2,
   BufferGeometry,
   BufferAttribute,
   Box3,
+  Raycaster,
 } from 'three'
 import { DragControls } from 'three/addons/controls/DragControls.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
@@ -32,7 +35,14 @@ import Stats from 'stats.js'
 import { toggleFullScreen } from './helpers/fullscreen'
 import { resizeRendererToDisplaySize } from './helpers/responsiveness'
 import { createGridTexture } from './helpers/plane'
-import { getVerticesFromObject, shapeMatching } from './helpers/shapeMatching'
+import { 
+  getVerticesFromObject, 
+  shapeMatching,
+  enhancedShapeMatchingWithPhysics,
+  initializePhysicsState,
+  PhysicsState,
+  ShapeMatchingParams
+} from './helpers/shapeMatching'
 import './style.css'
 
 const CANVAS_ID = 'scene'
@@ -95,31 +105,32 @@ interface SimulationParams {
   memoryUsage: number
 }
 
-// Initialize simulation parameters
+// Initialize simulation parameters - Matching C++ reference implementation EXACTLY
 const simParams: SimulationParams = {
-  dampingFactor: 0.1,
-  Rb: 0.1,
-  beta: 0.8,
-  tau: 0.8,
-  perturbation: 0.1,
-  dt: 0.016,  Famplitude: 10,
-  pickForce: 10,
-  deformationType: 'linear',
+  dampingFactor: 0.0,    // Rb_ = 0.0 in C++ (no Rayleigh damping by default)
+  Rb: 0.0,               // Rayleigh beta damping coefficient (C++ default)
+  beta: 0.0,             // Shape matching beta parameter (C++ default) 
+  tau: 1.0,              // Elastic time constant (C++ default)
+  perturbation: 0.1,     // Regularization perturbation (C++ default)
+  dt: 0.016,             // Standard 60fps time step (C++ uses variable dt)
+  Famplitude: 10.0,      // Force amplitude (increased for better visibility)
+  pickForce: 5.0,        // Picking force (increased for better effect)
+  deformationType: 'rotation', // Start with rotation mode
   adaptiveScaling: true,
   targetSize: 2,
-  autoCenter: true,
-  autoRestore: true,
+  autoCenter: true,  autoRestore: true,
   restoreSpeed: 0.02,
   showWireframe: false,
   showVertexMarkers: false,
   showForceField: false,
   showFixedPoints: true,
-  pause: true,  // Default to paused for stability
+  pause: false,  // Default to active physics simulation
   fps: 0,
   vertices: 0,
   triangles: 0,
   memoryUsage: 0
 }
+
 
 // Animation and interaction state
 const animation = { enabled: false, play: false }
@@ -130,8 +141,11 @@ const initialVertices: Map<Object3D, Vector3[]> = new Map()
 const initialMasses: Map<Object3D, number[]> = new Map()
 const initialPositions: Map<Object3D, Vector3> = new Map()
 
-// Auto-restore throttling
-let lastAutoRestoreLog = 0
+// Physics state for enhanced shape matching
+const physicsStates: Map<Object3D, PhysicsState> = new Map()
+const fixedVerticesMap: Map<Object3D, Set<number>> = new Map()
+
+// Auto-restore throttling (removed unused variable)
 
 // User input state
 const userInput = {
@@ -143,7 +157,7 @@ const userInput = {
   isPicking: false,
   pickedVertexIndex: -1,
   hasActiveForce: false, // Track if forces are being actively applied
-  activeKeys: new Set<string>()
+  activeKeys: new Set<string>() // Track which keys are currently pressed
 }
 
 // Statistics display object for GUI
@@ -238,11 +252,34 @@ function init() {
     const cubeVerticesVec3: Vector3[] = []
     for (let i = 0; i < cubeVertices.length; i += 3) {
       cubeVerticesVec3.push(new Vector3(cubeVertices[i], cubeVertices[i + 1], cubeVertices[i + 2]))
-    }
-
-    initialVertices.set(cube, cubeVerticesVec3)
+    }    initialVertices.set(cube, cubeVerticesVec3)
     initialMasses.set(cube, cubeVerticesVec3.map(() => 1))
-    initialPositions.set(cube, cube.position.clone())
+    initialPositions.set(cube, cube.position.clone())    // Initialize physics state for enhanced shape matching
+    const physicsState = initializePhysicsState(cube, cubeVerticesVec3)
+    physicsStates.set(cube, physicsState)
+      // Initialize fixed vertices set (empty by default)
+    fixedVerticesMap.set(cube, new Set<number>())
+    
+    // Add cube to dragable objects array
+    dragableObjects.push(cube)
+    
+    // Add initial small perturbation to trigger physics simulation
+    // This helps demonstrate that the deformation system is working
+    setTimeout(() => {
+      const physicsState = physicsStates.get(cube)
+      if (physicsState) {
+        // Apply small random forces to some vertices to create initial deformation
+        for (let i = 0; i < Math.min(3, physicsState.forces.length); i++) {
+          const randomForce = new Vector3(
+            (Math.random() - 0.5) * 0.5,
+            (Math.random() - 0.5) * 0.5,
+            (Math.random() - 0.5) * 0.5
+          )
+          physicsState.forces[i].add(randomForce)
+        }
+        console.log('Applied initial perturbation forces to demonstrate deformation')
+      }
+    }, 1000) // Wait 1 second after initialization
 
     // Ground plane
     const gridTexture = createGridTexture()
@@ -257,12 +294,11 @@ function init() {
       transparent: true,
       opacity: 0.6,
     })
+
     const plane = new Mesh(planeGeometry, planeMaterial)
     plane.rotateX(Math.PI / 2)
     plane.receiveShadow = true
     scene.add(plane)
-
-    dragableObjects.push(cube)
   }
 
   // ===== 🎥 CAMERA =====
@@ -270,9 +306,9 @@ function init() {
     camera = new PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000)
     camera.position.set(2, 2, 5)
   }
-
   // ===== 🕹️ CONTROLS =====
   setupControls()
+  setupVertexPicking()
 
   // ===== 🪄 HELPERS =====
   {
@@ -302,6 +338,14 @@ function init() {
 
   // ===== ⌨️ KEYBOARD CONTROLS =====
   setupKeyboardControls()
+  // ===== 🎯 VERTEX PICKING =====
+  setupVertexPicking()
+  
+  // ===== 🎬 ENABLE ANIMATION =====
+  // Enable physics animation by default for continuous simulation
+  animation.enabled = true
+  animation.play = true
+  console.log('Physics animation enabled for continuous shape matching simulation')
 }
 
 function setupControls() {
@@ -370,9 +414,7 @@ function setupControls() {
   dragControls.addEventListener('drag', (event) => {
     if (simParams.showVertexMarkers) {
       updateVertexMarkers(event.object)
-    }
-
-    const initialVerts = initialVertices.get(event.object)
+    }    const initialVerts = initialVertices.get(event.object)
     const initialPos = initialPositions.get(event.object)!
     const masses = initialMasses.get(event.object)
 
@@ -395,6 +437,8 @@ function setupControls() {
       toggleFullScreen(canvas)
     }
   })
+  // Setup keyboard controls
+  setupKeyboardControls()
 
   // Add control hints
   addControlHints()
@@ -505,17 +549,21 @@ function setupGUI() {
       const cubeVerticesVec3: Vector3[] = []
       for (let i = 0; i < cubeVertices.length; i += 3) {
         cubeVerticesVec3.push(new Vector3(cubeVertices[i], cubeVertices[i + 1], cubeVertices[i + 2]))
-      }
-
-      initialVertices.set(defaultCube, cubeVerticesVec3)
+      }      initialVertices.set(defaultCube, cubeVerticesVec3)
       initialMasses.set(defaultCube, cubeVerticesVec3.map(() => 1))
       initialPositions.set(defaultCube, defaultCube.position.clone())
 
+      // Initialize physics state for enhanced shape matching
+      const physicsState = initializePhysicsState(defaultCube, cubeVerticesVec3)
+      physicsStates.set(defaultCube, physicsState)
+      
+      // Initialize fixed vertices set (empty by default)
+      fixedVerticesMap.set(defaultCube, new Set<number>())
+
       scene.add(defaultCube)
       dragableObjects.push(defaultCube)
-      
-      // Update drag controls
-      dragControls.deactivate()
+        // Update drag controls
+      dragControls.disconnect()
       dragControls = new DragControls(dragableObjects, camera, renderer.domElement)
       setupDragEventListeners()
       
@@ -634,39 +682,43 @@ function setupKeyboardControls() {
     userInput.isCtrlPressed = event.ctrlKey
 
     // Track active keys for auto-restore system
-    userInput.activeKeys.add(event.key.toLowerCase())
-
-    // Force application keys (based on reference project)
+    userInput.activeKeys.add(event.key.toLowerCase())    // Force application keys (C++ style directional forces)
     switch (event.key.toLowerCase()) {
-      case 'i': // Up force
+      case 'i': // Up force (positive Y)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(0, simParams.Famplitude, 0))
+        console.log('Applied UP force via keyboard (i key)')
         break
-      case 'k': // Down force
+      case 'k': // Down force (negative Y)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(0, -simParams.Famplitude, 0))
+        console.log('Applied DOWN force via keyboard (k key)')
         break
-      case 'j': // Left force
+      case 'j': // Left force (negative X)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(-simParams.Famplitude, 0, 0))
+        console.log('Applied LEFT force via keyboard (j key)')
         break
-      case 'l': // Right force
+      case 'l': // Right force (positive X)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(simParams.Famplitude, 0, 0))
+        console.log('Applied RIGHT force via keyboard (l key)')
         break
-      case ' ': // Forward force (space)
+      case ' ': // Forward force (positive Z)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(0, 0, simParams.Famplitude))
+        console.log('Applied FORWARD force via keyboard (space key)')
         break
-      case 'b': // Backward force
+      case 'b': // Backward force (negative Z)
         event.preventDefault()
         userInput.hasActiveForce = true
         applyDirectionalForce(new Vector3(0, 0, -simParams.Famplitude))
+        console.log('Applied BACKWARD force via keyboard (b key)')
         break
     }
   })
@@ -689,11 +741,10 @@ function setupKeyboardControls() {
   })
 }
 
-function handleCanvasClick(_event: MouseEvent) {
+function handleCanvasClick(event: MouseEvent) {
   if (userInput.isShiftPressed) {
-    // Fix/unfix vertex
-    // TODO: Implement vertex picking for fixing
-    console.log('Shift+Click: Fix/unfix vertex functionality')
+    // Fix/unfix vertex using enhanced physics system
+    handleVertexFixing(event)
   }
 }
 
@@ -908,17 +959,24 @@ function loadProcessedObject(object: Object3D, fileName: string) {
   })
   
   scene.add(object)
+    // Store object data AFTER positioning and validation
+  const vertices = getVerticesFromObject(object);
   
-  // Store object data AFTER positioning and validation
-  const vertices = getVerticesFromObject(object)
   initialVertices.set(object, vertices)
   initialMasses.set(object, vertices.map(() => 1))
   initialPositions.set(object, object.position.clone())
   
+  // Initialize physics state for enhanced shape matching
+  const physicsState = initializePhysicsState(object, vertices)
+  physicsStates.set(object, physicsState)
+  
+  // Initialize fixed vertices set (empty by default)
+  fixedVerticesMap.set(object, new Set<number>())
+  
   dragableObjects.push(object)
   
   // Update drag controls
-  dragControls.deactivate()
+  dragControls.disconnect()
   dragControls = new DragControls(dragableObjects, camera, renderer.domElement)
   setupDragEventListeners()
   
@@ -983,13 +1041,11 @@ function setupDragEventListeners() {
   dragControls.addEventListener('drag', (event) => {
     if (simParams.showVertexMarkers) {
       updateVertexMarkers(event.object)
-    }
-
-    const initialVerts = initialVertices.get(event.object)
+    }    const initialVerts = initialVertices.get(event.object)
     const initialPos = initialPositions.get(event.object)!
     const masses = initialMasses.get(event.object)
 
-    if (initialVerts && masses && initialPos) {
+    if (initialVerts && initialPos && masses) {
       try {
         shapeMatching(event.object, initialVerts, initialPos, masses, simParams.dampingFactor)
         if (simParams.showVertexMarkers) {
@@ -1009,60 +1065,464 @@ function setupDragEventListeners() {
   })
 }
 
-function applyDirectionalForce(force: Vector3) {
-  if (dragableObjects.length > 0) {
-    applyForceAndSimulate(dragableObjects[0], force)
+// C++-style vertex picking and dragging functionality
+function setupVertexPicking() {
+  const raycaster = new Raycaster()
+  const mouse = new Vector2()
+  
+  canvas.addEventListener('mousedown', (event) => {
+    if (event.shiftKey) {
+      // Calculate mouse position in normalized device coordinates
+      const rect = canvas.getBoundingClientRect()
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+      
+      raycaster.setFromCamera(mouse, camera)
+      
+      // Find closest vertex to ray intersection
+      for (const object of dragableObjects) {
+        const physicsState = physicsStates.get(object)
+        if (!physicsState) continue
+        
+        const intersects = raycaster.intersectObject(object, true)
+        if (intersects.length > 0) {
+          const intersectionPoint = intersects[0].point
+          
+          // Find closest vertex to intersection point
+          let closestVertexIndex = -1
+          let minDistance = Infinity
+          
+          for (let i = 0; i < physicsState.positions.length; i++) {
+            const distance = physicsState.positions[i].distanceTo(intersectionPoint)
+            if (distance < minDistance) {
+              minDistance = distance
+              closestVertexIndex = i
+            }
+          }
+          
+          if (closestVertexIndex !== -1 && minDistance < 0.5) {
+            // Toggle fixed state of vertex
+            const fixedVertices = fixedVerticesMap.get(object) || new Set()
+            if (fixedVertices.has(closestVertexIndex)) {
+              fixedVertices.delete(closestVertexIndex)
+              console.log(`Unfixed vertex ${closestVertexIndex}`)
+            } else {
+              fixedVertices.add(closestVertexIndex)
+              console.log(`Fixed vertex ${closestVertexIndex}`)
+            }
+            fixedVerticesMap.set(object, fixedVertices)
+            
+            // Update GUI display
+            updateFixedVertexVisualization(object)
+          }
+        }
+      }
+    }
+  })
+}
+
+// Visualize fixed vertices
+function updateFixedVertexVisualization(object: Object3D) {
+  // Clear existing fixed vertex markers
+  fixedVertexMarkers.forEach(marker => {
+    if (marker.parent) {
+      marker.parent.remove(marker)
+    } else {
+      scene.remove(marker)
+    }
+  })
+  fixedVertexMarkers.length = 0
+  
+  if (!simParams.showFixedPoints) return
+  
+  const fixedVertices = fixedVerticesMap.get(object)
+  
+  if (!fixedVertices || fixedVertices.size === 0) return
+  
+  // Use the same approach as scene.ts: get vertex positions from mesh geometry
+  let vertexIndex = 0
+  object.traverse((child) => {
+    if (child instanceof Mesh) {
+      const geometry = child.geometry as BufferGeometry
+      const position = geometry.attributes.position
+      
+      for (let i = 0; i < position.count; i++) {
+        if (fixedVertices.has(vertexIndex)) {
+          // Get vertex position in local coordinates
+          const localVertex = new Vector3().fromBufferAttribute(position, i)
+          
+          // Create blue sphere marker for fixed vertex
+          const markerGeometry = new SphereGeometry(0.04, 8, 6)
+          const markerMaterial = new MeshBasicMaterial({ color: 'blue' })
+          const marker = new Mesh(markerGeometry, markerMaterial)
+          
+          // Set position in local coordinates relative to the mesh
+          marker.position.copy(localVertex)
+          marker.userData = { vertexIndex, parentObject: child }
+          
+          // Add marker as child of the mesh so it moves with the object
+          child.add(marker)
+          fixedVertexMarkers.push(marker)
+        }
+        vertexIndex++
+      }
+    }
+  })
+}
+
+// Enhanced vertex fixing for scene-enhanced.ts using physics state
+function handleVertexFixing(event: MouseEvent) {
+  // Calculate mouse position in normalized device coordinates
+  const rect = canvas.getBoundingClientRect()
+  const mouse = new Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  )
+
+  const raycaster = new Raycaster()
+  raycaster.setFromCamera(mouse, camera)
+
+  // Find intersections with dragable objects
+  const intersects = raycaster.intersectObjects(dragableObjects, true)
+  
+  if (intersects.length > 0) {
+    const intersect = intersects[0]
+    const clickedMesh = intersect.object
+    
+    // Find the parent dragable object
+    let parentObject: Object3D | null = null
+    for (const dragableObj of dragableObjects) {
+      if (dragableObj === clickedMesh || dragableObj.getObjectByProperty('uuid', clickedMesh.uuid)) {
+        parentObject = dragableObj
+        break
+      }
+    }
+    
+    if (!parentObject) {
+      console.warn('Could not find parent dragable object')
+      return
+    }
+
+    const physicsState = physicsStates.get(parentObject)
+    const fixedVertices = fixedVerticesMap.get(parentObject)
+    
+    if (!physicsState || !fixedVertices) {
+      console.warn('Physics state or fixed vertices not found for object')
+      return
+    }
+
+    try {
+      // Calculate intersection point in world coordinates
+      const intersectionPoint = intersect.point.clone()
+      
+      // Find closest vertex in physics state
+      let closestVertexIndex = -1
+      let minDistance = Infinity
+      
+      for (let i = 0; i < physicsState.positions.length; i++) {
+        // Transform physics position to world coordinates by applying object's matrix
+        const worldPosition = physicsState.positions[i].clone()
+        worldPosition.applyMatrix4(parentObject.matrixWorld)
+        
+        const distance = worldPosition.distanceTo(intersectionPoint)
+        if (distance < minDistance) {
+          minDistance = distance
+          closestVertexIndex = i
+        }
+      }
+      
+      // Check if we found a close enough vertex (distance threshold)
+      if (closestVertexIndex !== -1 && minDistance < 0.5) {
+        // Toggle fixed state of vertex
+        if (fixedVertices.has(closestVertexIndex)) {
+          fixedVertices.delete(closestVertexIndex)
+          console.log(`Vertex ${closestVertexIndex} unfixed (distance: ${minDistance.toFixed(3)})`)
+        } else {
+          fixedVertices.add(closestVertexIndex)
+          console.log(`Vertex ${closestVertexIndex} fixed (distance: ${minDistance.toFixed(3)})`)
+        }
+        
+        // Update the fixed vertices map
+        fixedVerticesMap.set(parentObject, fixedVertices)
+        
+        // Update visual representation of fixed vertices
+        updateFixedVertexVisualization(parentObject)
+      } else {
+        console.log(`No vertex close enough to click point (closest distance: ${minDistance.toFixed(3)})`)
+      }
+    } catch (error) {
+      console.error('Error in handleVertexFixing:', error)
+    }
   }
 }
 
+// Apply distributed force to physics state (Fixed C++ algorithm implementation)
+// Based on deformable_mesh.cpp lines 93-130
+function applyDistributedForceToPhysicsState(physicsState: PhysicsState, forceLocation: Vector3, force: Vector3) {
+  const { positions, forces } = physicsState
+  const numVertices = positions.length
+
+  // Normalize force direction (matching C++ force.normalized())
+  const direction = force.clone().normalize()
+  
+  // Use the provided force location (already calculated by applyDirectionalForce)
+  // Don't recalculate to avoid overriding specific directional positioning
+  const actualForceLocation = forceLocation
+  
+  console.log(`=== Force Distribution Debug ===`)
+  console.log(`Force vector: (${force.x.toFixed(3)}, ${force.y.toFixed(3)}, ${force.z.toFixed(3)})`)
+  console.log(`Force direction (normalized): (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)}, ${direction.z.toFixed(3)})`)
+  console.log(`Using force location: (${actualForceLocation.x.toFixed(3)}, ${actualForceLocation.y.toFixed(3)}, ${actualForceLocation.z.toFixed(3)})`)
+  console.log(`Number of vertices: ${numVertices}`)
+    // Build test function for distributing the force on the mesh (matching C++ algorithm)
+  const t: number[] = new Array(numVertices).fill(0)
+  let debugCount = 0
+  let validAngles = 0
+  let totalAngles = 0
+
+  for (let i = 0; i < numVertices; i++) {
+    // Calculate relative position vector: r = x[i] - location
+    const r = positions[i].clone().sub(actualForceLocation)
+    
+    // Skip if vertex is at the exact force location
+    const rNorm = r.length()
+    if (rNorm < 1e-10) {
+      t[i] = 1.0 // Maximum weight for vertices at force location
+      if (debugCount < 5) {
+        console.log(`Vertex ${i}: At force location, weight = 1.0`)
+        debugCount++
+      }
+      continue
+    }
+
+    // Calculate projection: s1 = r.dot(-direction) (exact C++ match)
+    const negDirection = direction.clone().negate()
+    const s1 = r.dot(negDirection)
+    
+    // Calculate angle: theta = acos(s1 / r.norm()) (exact C++ match)
+    const cosTheta = s1 / rNorm
+    
+    // Clamp cosTheta to valid range [-1, 1] to avoid NaN from acos
+    const clampedCosTheta = Math.max(-1, Math.min(1, cosTheta))
+    const theta = Math.acos(clampedCosTheta)
+    
+    totalAngles++
+    
+    // Apply test function: t(i) = exp(-theta) if abs(theta) < π/2, else 0
+    if (Math.abs(theta) < Math.PI / 2.0) {
+      t[i] = Math.exp(-theta)
+      validAngles++
+      if (debugCount < 5) {
+        console.log(`Vertex ${i}: r=(${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)}), rNorm=${rNorm.toFixed(3)}, s1=${s1.toFixed(3)}, cosTheta=${cosTheta.toFixed(3)}, theta=${theta.toFixed(3)}, weight=${t[i].toFixed(4)}`)
+        debugCount++
+      }
+    } else {
+      t[i] = 0.0
+      if (debugCount < 5) {
+        console.log(`Vertex ${i}: r=(${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)}), theta=${theta.toFixed(3)} > π/2, weight=0 (outside cone)`)
+        debugCount++
+      }
+    }
+  }
+
+  // Enhanced debugging information
+  console.log(`Angle analysis: ${validAngles}/${totalAngles} vertices have valid angles (< π/2)`)
+  
+  // Count non-zero weights for debugging
+  const nonZeroWeights = t.filter(weight => weight > 0).length
+  console.log(`Non-zero weights: ${nonZeroWeights}/${numVertices}`)
+
+  // Find maximum weight for normalization (matching C++ tmax)
+  const tmax = Math.max(...t)
+  console.log(`Max weight (tmax): ${tmax}`)
+  
+  // If all weights are zero, try alternative strategy: use distance-based fallback
+  if (tmax < 1e-10) {
+    console.warn('All test function values are zero, using distance-based fallback')
+    
+    // Fallback: Use distance-based force distribution
+    for (let i = 0; i < numVertices; i++) {
+      const r = positions[i].clone().sub(forceLocation)
+      const distance = r.length()
+      
+      if (distance < 1e-10) {
+        t[i] = 1.0
+      } else {
+        // Exponential falloff based on distance (normalized to object size)
+        const maxDistance = 2.0 // Assume object fits in 2-unit cube
+        const normalizedDistance = Math.min(distance / maxDistance, 1.0)
+        t[i] = Math.exp(-2.0 * normalizedDistance)
+      }
+    }
+    
+    const fallbackTmax = Math.max(...t)
+    if (fallbackTmax < 1e-10) {
+      console.error('Even fallback method failed, skipping force application')
+      return
+    }
+    
+    console.log(`Using distance-based fallback, new tmax: ${fallbackTmax}`)
+    
+    // Apply fallback forces
+    for (let i = 0; i < numVertices; i++) {
+      const normalizedWeight = t[i] / fallbackTmax
+      const clampedWeight = Math.max(0.0, Math.min(1.0, normalizedWeight))
+      const vertexForce = force.clone().multiplyScalar(clampedWeight)
+      forces[i].add(vertexForce)
+    }
+    
+    console.log(`Applied distance-based force distribution to ${numVertices} vertices`)
+    return
+  }
+
+  // Calculate force interpolation weight (matching C++ force_interpolation_weight)
+  const forceInterpolationWeight = 1.0 / tmax
+
+  // Apply weighted forces to each vertex (matching C++ force computation)
+  for (let i = 0; i < numVertices; i++) {
+    // Calculate normalized weight for this vertex
+    const normalizedWeight = t[i] * forceInterpolationWeight
+    
+    // Ensure weight is in [0,1] range (matching C++ assertion)
+    const clampedWeight = Math.max(0.0, Math.min(1.0, normalizedWeight))
+    
+    // Apply weighted force: f[i] = weight * force (matching C++ f.block computation)
+    const vertexForce = force.clone().multiplyScalar(clampedWeight)
+    forces[i].add(vertexForce)
+  }
+
+  console.log(`Applied C++ style angular force distribution to ${numVertices} vertices`)
+  console.log(`Force interpolation weight: ${forceInterpolationWeight.toFixed(4)}`)
+}
+
+function applyForceAndSimulate(object: Object3D, force: Vector3, location?: Vector3) {
+  const physicsState = physicsStates.get(object)
+
+  if (!physicsState) {
+    console.warn('Cannot apply force: physics state not found for object')
+    return
+  }
+
+  // Validate object state before applying force
+  if (!validateObjectState(object)) {
+    console.warn('Cannot apply force: object in invalid state')
+    resetObjectToSafeState(object)
+    return
+  }
+
+  if (simParams.showVertexMarkers) {
+    showVertices(object)
+  }
+
+  // Calculate geometric center if no location specified (matching C++ behavior)
+  let forceLocation = location
+  if (!forceLocation) {
+    forceLocation = calculateGeometricCenter(object)
+  }
+
+  // Apply force using C++-style distance-based distribution to physics state
+  applyDistributedForceToPhysicsState(physicsState, forceLocation, force)
+  if (simParams.showVertexMarkers) {
+    updateVertexMarkers(object)
+  }
+
+  // Enable animation when force is applied (even if globally paused)
+  // This ensures immediate visual feedback when applying forces
+  animation.enabled = true
+  animation.play = true
+  
+  // Temporarily unpause simulation to show deformation
+  const wasInitiallyPaused = simParams.pause
+  simParams.pause = false
+  
+  // Auto-pause after a short duration to allow user control
+  setTimeout(() => {
+    if (wasInitiallyPaused) {
+      // Only re-pause if it was initially paused and no other forces are active
+      if (!userInput.hasActiveForce && userInput.activeKeys.size === 0) {
+        simParams.pause = true
+        console.log('Auto-paused simulation after force application')
+      }
+    }
+  }, 2000) // Allow 2 seconds of simulation
+
+  console.log(`Applied distributed force from location (${forceLocation.x.toFixed(2)}, ${forceLocation.y.toFixed(2)}, ${forceLocation.z.toFixed(2)})`)
+}
+
+// Calculate geometric center of object (matching C++ geometric_center calculation)
+function calculateGeometricCenter(object: Object3D): Vector3 {
+  const vertices = getVerticesFromObject(object)
+  const center = new Vector3()
+  
+  if (vertices.length === 0) {
+    return center
+  }
+
+  for (const vertex of vertices) {
+    center.add(vertex)
+  }
+  
+  center.divideScalar(vertices.length)
+  return center
+}
+
+// Animate function - main animation loop
 function animate() {
   requestAnimationFrame(animate)
   
   stats.begin()
   
   // Update statistics
-  updateStatistics()
-  
-  // Validate all objects before physics simulation
-  for (const object of dragableObjects) {
-    if (!validateObjectState(object)) {
-      console.warn('Object instability detected, resetting')
-      resetObjectToSafeState(object)
-      animation.enabled = false
-      animation.play = false
-      simParams.pause = true
-    }
-  }
-  
-  // Physics simulation
+  updateStatistics()  // Physics simulation
   if (!simParams.pause && animation.enabled && animation.play) {
+    // Run physics simulation continuously for all objects
+    // This allows for gravity, elastic forces, and other physics effects
     for (const object of dragableObjects) {
-      const initialVerts = initialVertices.get(object)
+      // Validate object state before shape matching
+      if (!validateObjectState(object)) {
+        console.warn("Object state validation failed, skipping physics simulation")
+        continue
+      }
+        const initialVerts = initialVertices.get(object)
       const initialPos = initialPositions.get(object)
       const masses = initialMasses.get(object)
+      const physicsState = physicsStates.get(object)
 
-      if (initialVerts && initialPos && masses) {
+      if (initialVerts && initialPos && masses && physicsState) {
         try {
-          shapeMatching(object, initialVerts, initialPos, masses, simParams.dampingFactor)
+          // Create shape matching parameters from simulation parameters
+          const shapeMatchingParams: ShapeMatchingParams = {
+            deformationType: simParams.deformationType,
+            beta: simParams.beta,
+            tau: simParams.tau,
+            perturbation: simParams.perturbation,
+            dampingFactor: simParams.dampingFactor,
+            fixedVertices: fixedVerticesMap.get(object)
+          }
           
-          // Validate object after physics update
+          // Use physics-based shape matching instead of basic shape matching
+          enhancedShapeMatchingWithPhysics(object, physicsState, shapeMatchingParams, simParams.dt)
+          
+          // Validate after shape matching
           if (!validateObjectState(object)) {
-            console.warn('Physics caused instability, stopping simulation')
+            console.warn("Object state corrupted after shape matching, resetting to safe state")
             resetObjectToSafeState(object)
-            animation.enabled = false
-            animation.play = false
-            simParams.pause = true
+          }
+          
+          // Update vertex markers if enabled
+          if (simParams.showVertexMarkers) {
+            updateVertexMarkers(object)
           }
         } catch (error) {
-          console.error('Error in shape matching:', error)
+          console.error("Error during shape matching:", error)
           resetObjectToSafeState(object)
-          animation.enabled = false
-          animation.play = false
-          simParams.pause = true
         }
       }
     }
   }
+  
+  // Apply auto restoration when simulation is paused or not active
+  applyAutoRestore()
 
   // Handle responsive canvas
   if (resizeRendererToDisplaySize(renderer)) {
@@ -1074,137 +1534,6 @@ function animate() {
   cameraControls.update()
   renderer.render(scene, camera)
   stats.end()
-
-  // Apply auto-restore if enabled
-  applyAutoRestore()
-}
-
-// Auto restoration function - gradually restore shape when no forces are applied
-function applyAutoRestore() {
-  const now = performance.now()
-  const shouldLog = now - lastAutoRestoreLog > 2000 // Log every 2 seconds max
-  
-  if (shouldLog) {
-    console.log(`=== Auto Restore Check ===`)
-    console.log(`simParams.autoRestore: ${simParams.autoRestore}`)
-    console.log(`userInput.hasActiveForce: ${userInput.hasActiveForce}`)
-    console.log(`userInput.isPicking: ${userInput.isPicking}`)
-    console.log(`userInput.activeKeys size: ${userInput.activeKeys.size}`)
-    console.log(`dragableObjects length: ${dragableObjects.length}`)
-    lastAutoRestoreLog = now
-  }
-  
-  if (!simParams.autoRestore || userInput.hasActiveForce || userInput.isPicking) {
-    if (shouldLog) {
-      console.log('Skipping auto restore:', {
-        autoRestore: simParams.autoRestore,
-        hasActiveForce: userInput.hasActiveForce,
-        isPicking: userInput.isPicking,
-        activeKeysSize: userInput.activeKeys.size,
-        activeKeys: Array.from(userInput.activeKeys)
-      })
-    }
-    return // Skip auto restore if disabled or forces are active
-  }
-  
-  if (shouldLog) {
-    console.log('✅ Auto restore conditions met - proceeding with restoration')
-  }
-  
-  dragableObjects.forEach((object, index) => {
-    const originalVertices = initialVertices.get(object)
-    
-    if (!originalVertices) {
-      if (shouldLog) {
-        console.log(`❌ No original vertices found for object ${index}:`, object.constructor.name)
-      }
-      return
-    }
-
-    if (shouldLog) {
-      console.log(`🔧 Restoring object ${index} with ${originalVertices.length} original vertices`)
-    }
-
-    // Handle mesh objects (including complex OBJ files with multiple meshes)
-    object.traverse((child) => {
-      if (child instanceof Mesh) {
-        const geometry = child.geometry as BufferGeometry
-        const positionAttr = geometry.attributes.position
-        let hasChanges = false
-        let vertexOffset = 0
-
-        // Calculate vertex offset for this mesh within the parent object
-        const parent = child.parent
-        if (parent && parent !== object) {
-          // Find all previous mesh siblings to calculate offset
-          parent.children.forEach((sibling) => {
-            if (sibling === child) return // Stop when we reach current child
-            if (sibling instanceof Mesh) {
-              const siblingGeometry = sibling.geometry as BufferGeometry
-              vertexOffset += siblingGeometry.attributes.position.count
-            }
-          })
-        }
-
-        // Gradually move each vertex towards its original position
-        for (let i = 0; i < positionAttr.count; i++) {
-          const globalVertexIndex = vertexOffset + i
-          
-          // Skip if this vertex doesn't have original data
-          if (globalVertexIndex >= originalVertices.length) {
-            continue
-          }
-
-          const currentPos = new Vector3(
-            positionAttr.getX(i),
-            positionAttr.getY(i),
-            positionAttr.getZ(i)
-          )
-          
-          // Get original position directly - it's already in the correct local space
-          const originalPos = originalVertices[globalVertexIndex].clone()
-          
-          // Check if the vertex is significantly displaced from its original shape
-          const distance = currentPos.distanceTo(originalPos)
-          if (distance > 0.001) { // Only apply restoration if vertex is displaced
-            // Gradually move towards original position with adaptive restore speed
-            const adaptiveRestoreSpeed = Math.min(simParams.restoreSpeed * (1 + distance), 0.1)
-            const restoredPos = currentPos.lerp(originalPos, adaptiveRestoreSpeed)
-            
-            // Validate restored position
-            if (Number.isFinite(restoredPos.x) && Number.isFinite(restoredPos.y) && Number.isFinite(restoredPos.z)) {
-              positionAttr.setXYZ(i, restoredPos.x, restoredPos.y, restoredPos.z)
-              hasChanges = true
-            }
-          }
-        }
-
-        // Update geometry if changes were made
-        if (hasChanges) {
-          positionAttr.needsUpdate = true
-          geometry.computeBoundingSphere()
-          geometry.computeVertexNormals()
-        }
-      }
-    })
-    
-    // Note: We do NOT restore object position here - only shape
-    // The object position should remain where the user moved it
-  })
-}
-
-function updateStatistics() {
-  statsDisplay.fps = Math.round(1 / clock.getDelta()).toString()
-  statsDisplay.vertices = dragableObjects.reduce((total, obj) => {
-    const vertices = getVerticesFromObject(obj)
-    return total + vertices.length
-  }, 0).toString()
-  statsDisplay.triangles = '0' // TODO: Calculate triangles
-  
-  // Safe memory usage calculation with type assertion
-  const performanceAny = performance as any
-  const memoryUsage = performanceAny.memory?.usedJSHeapSize || 0
-  statsDisplay.memory = Math.round(memoryUsage / 1024) + ' KB'
 }
 
 // Vertex visualization functions
@@ -1241,76 +1570,257 @@ function hideVertexMarkers() {
   vertexMarkers.length = 0
 }
 
-function applyForceAndSimulate(object: Object3D, force: Vector3) {
-  const initialVerts = initialVertices.get(object)
-  const initialPos = initialPositions.get(object)
-  const masses = initialMasses.get(object)
+// Update statistics
+function updateStatistics() {
+  statsDisplay.fps = Math.round(1 / clock.getDelta()).toString()
+  
+  let totalVertices = 0
+  try {
+    totalVertices = dragableObjects.reduce((total, obj) => {
+      // Validate object before processing
+      if (!obj || !obj.position || !obj.scale || !obj.rotation) {
+        console.warn("Invalid object found in dragableObjects, skipping")
+        return total
+      }
+      
+      try {
+        const vertices = getVerticesFromObject(obj)
+        return total + vertices.length
+      } catch (error) {
+        console.error("Error getting vertices from object:", error)
+        return total
+      }
+    }, 0)
+  } catch (error) {
+    console.error("Error in vertex counting:", error)
+    totalVertices = 0
+  }
+  
+  statsDisplay.vertices = totalVertices.toString()
+  statsDisplay.triangles = '0' // TODO: Calculate triangles
+  
+  // Safe memory usage check
+  if (typeof (performance as any).memory !== 'undefined') {
+    statsDisplay.memory = Math.round((performance as any).memory.usedJSHeapSize / 1024) + ' KB'
+  } else {
+    statsDisplay.memory = 'N/A'
+  }
+}
 
-  if (!initialVerts || !initialPos || !masses) {
-    console.warn('Cannot apply force: object data not found')
+// Auto restoration function - simplified version for enhanced scene
+function applyAutoRestore() {
+  // Simple auto restore - can be enhanced later
+  if (!simParams.autoRestore) {
     return
   }
-
-  // Validate object state before applying force
-  if (!validateObjectState(object)) {
-    console.warn('Cannot apply force: object in invalid state')
-    resetObjectToSafeState(object)
+  
+  // Check if auto restore should be applied
+  const shouldRestore = !userInput.hasActiveForce && 
+                       userInput.activeKeys.size === 0 && 
+                       !userInput.isPicking &&
+                       simParams.pause
+  
+  if (!shouldRestore) {
     return
   }
-
-  if (simParams.showVertexMarkers) {
-    showVertices(object)
-  }
-
-  // Limit force magnitude for stability
-  const maxForce = 50
-  const limitedForce = force.clone()
-  if (limitedForce.length() > maxForce) {
-    limitedForce.normalize().multiplyScalar(maxForce)
-    console.log(`Force limited to ${maxForce} for stability`)
-  }
-
-  let modifiedVertices = 0
-  object.traverse((child) => {
-    if (child instanceof Mesh) {
-      const geometry = child.geometry
-      if (geometry instanceof BufferGeometry) {
+  
+  // Apply gradual restoration to each object
+  dragableObjects.forEach((object) => {
+    const originalVertices = initialVertices.get(object)
+    
+    if (!originalVertices) {
+      return
+    }
+    
+    // Restore object vertices gradually
+    object.traverse((child) => {
+      if (child instanceof Mesh) {
+        const geometry = child.geometry as BufferGeometry
         const positionAttr = geometry.attributes.position
-
-        // Reduce the number of affected vertices for better control
-        const numVerticesToAffect = Math.max(1, Math.floor(positionAttr.count * (0.1 + Math.random() * 0.1)))
-
-        for (let i = 0; i < numVerticesToAffect; i++) {
-          const randomVertexIndex = Math.floor(Math.random() * positionAttr.count)
-          const vertex = new Vector3().fromBufferAttribute(positionAttr, randomVertexIndex)
-
-          // Apply smaller, more controlled force
-          const vertexForce = limitedForce.clone().multiplyScalar(0.1 + Math.random() * 0.1)
-          vertex.add(vertexForce)
-
-          // Validate vertex position
-          if (Number.isFinite(vertex.x) && Number.isFinite(vertex.y) && Number.isFinite(vertex.z)) {
-            positionAttr.setXYZ(randomVertexIndex, vertex.x, vertex.y, vertex.z)
-            modifiedVertices++
+        let hasChanges = false
+        
+        for (let i = 0; i < positionAttr.count && i < originalVertices.length; i++) {
+          const currentPos = new Vector3(
+            positionAttr.getX(i),
+            positionAttr.getY(i),
+            positionAttr.getZ(i)
+          )
+          
+          const originalPos = originalVertices[i].clone()
+          const distance = currentPos.distanceTo(originalPos)
+          
+          if (distance > 0.001) {
+            const restoredPos = currentPos.lerp(originalPos, simParams.restoreSpeed)
+            positionAttr.setXYZ(i, restoredPos.x, restoredPos.y, restoredPos.z)
+            hasChanges = true
           }
         }
-
-        positionAttr.needsUpdate = true
+        
+        if (hasChanges) {
+          positionAttr.needsUpdate = true
+          geometry.computeBoundingSphere()
+          geometry.computeVertexNormals()
+        }
       }
-    }
+    })
   })
-
-  if (simParams.showVertexMarkers) {
-    updateVertexMarkers(object)
-  }
-
-  // Only enable animation if simulation is not paused
-  if (!simParams.pause) {
-    animation.enabled = true
-    animation.play = true
-  }
-
-  console.log(`Applied force to ${modifiedVertices} vertices`)
 }
 
 export { gui }
+
+// Force direction indicator functions
+function showForceIndicator(direction: string, forceVector: Vector3) {
+  // Remove existing force indicator
+  hideForceIndicator()
+  
+  // Create force indicator element
+  const indicator = document.createElement('div')
+  indicator.id = 'force-indicator'
+  indicator.innerHTML = `
+    <div><strong>Force Applied: ${direction}</strong></div>
+    <div>Direction: (${forceVector.x.toFixed(2)}, ${forceVector.y.toFixed(2)}, ${forceVector.z.toFixed(2)})</div>
+    <div>Magnitude: ${forceVector.length().toFixed(2)}</div>
+  `
+  indicator.style.position = 'absolute'
+  indicator.style.top = '20px'
+  indicator.style.right = '20px'
+  indicator.style.color = 'white'
+  indicator.style.padding = '15px 20px'
+  indicator.style.backgroundColor = 'rgba(0, 100, 255, 0.9)'
+  indicator.style.borderRadius = '10px'
+  indicator.style.fontSize = '14px'
+  indicator.style.fontFamily = 'monospace'
+  indicator.style.zIndex = '1000'
+  indicator.style.border = '2px solid #0066cc'
+  indicator.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)'
+  
+  document.body.appendChild(indicator)
+  
+  // Auto-hide after 3 seconds
+  setTimeout(hideForceIndicator, 3000)
+}
+
+function hideForceIndicator() {
+  const existingIndicator = document.getElementById('force-indicator')
+  if (existingIndicator) {
+    existingIndicator.remove()
+  }
+}
+
+// Enhanced directional force application with specific force points
+function applyDirectionalForce(force: Vector3) {
+  if (dragableObjects.length > 0) {
+    const object = dragableObjects[0]
+    const physicsState = physicsStates.get(object)
+    
+    if (!physicsState) {
+      console.warn('No physics state found for directional force')
+      return
+    }
+    
+    // Calculate specific force application point based on exact force direction
+    const forceLocation = calculateSpecificForceLocation(physicsState, force)
+    
+    // Determine direction name for indicator
+    let directionName = 'CUSTOM'
+    if (force.y > 0 && Math.abs(force.x) < 0.1 && Math.abs(force.z) < 0.1) directionName = 'UP'
+    else if (force.y < 0 && Math.abs(force.x) < 0.1 && Math.abs(force.z) < 0.1) directionName = 'DOWN'
+    else if (force.x < 0 && Math.abs(force.y) < 0.1 && Math.abs(force.z) < 0.1) directionName = 'LEFT'
+    else if (force.x > 0 && Math.abs(force.y) < 0.1 && Math.abs(force.z) < 0.1) directionName = 'RIGHT'
+    else if (force.z > 0 && Math.abs(force.x) < 0.1 && Math.abs(force.y) < 0.1) directionName = 'FORWARD'
+    else if (force.z < 0 && Math.abs(force.x) < 0.1 && Math.abs(force.y) < 0.1) directionName = 'BACKWARD'
+    
+    // Show visual indicator
+    showForceIndicator(directionName, force)
+    
+    console.log(`=== Directional Force Application ===`)
+    console.log(`Direction: ${directionName}`)
+    console.log(`Force: (${force.x.toFixed(3)}, ${force.y.toFixed(3)}, ${force.z.toFixed(3)})`)
+    console.log(`Force location: (${forceLocation.x.toFixed(3)}, ${forceLocation.y.toFixed(3)}, ${forceLocation.z.toFixed(3)})`)
+    
+    // Apply force with specific location
+    applyForceAndSimulate(object, force, forceLocation)
+    
+    console.log(`Applied ${directionName} force from specific location`)
+  } else {
+    console.warn('No objects available to apply directional force to')
+  }
+}
+
+// Calculate specific force location based on exact force direction
+function calculateSpecificForceLocation(physicsState: PhysicsState, force: Vector3): Vector3 {
+  const { positions } = physicsState
+  const numVertices = positions.length
+  
+  // Calculate bounding box from physics state positions
+  const min = new Vector3(Infinity, Infinity, Infinity)
+  const max = new Vector3(-Infinity, -Infinity, -Infinity)
+  
+  for (let i = 0; i < numVertices; i++) {
+    const pos = positions[i]
+    min.x = Math.min(min.x, pos.x)
+    min.y = Math.min(min.y, pos.y)
+    min.z = Math.min(min.z, pos.z)
+    max.x = Math.max(max.x, pos.x)
+    max.y = Math.max(max.y, pos.y)
+    max.z = Math.max(max.z, pos.z)
+  }
+  
+  const center = min.clone().add(max).multiplyScalar(0.5)
+  const size = max.clone().sub(min)
+  
+  console.log(`=== calculateSpecificForceLocation Debug ===`)
+  console.log(`Bounding box: min=(${min.x.toFixed(3)}, ${min.y.toFixed(3)}, ${min.z.toFixed(3)})`)
+  console.log(`Bounding box: max=(${max.x.toFixed(3)}, ${max.y.toFixed(3)}, ${max.z.toFixed(3)})`)
+  console.log(`Center: (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)})`)
+  console.log(`Size: (${size.x.toFixed(3)}, ${size.y.toFixed(3)}, ${size.z.toFixed(3)})`)
+  console.log(`Force vector: (${force.x.toFixed(3)}, ${force.y.toFixed(3)}, ${force.z.toFixed(3)})`)
+  
+  let forceLocation: Vector3
+  let locationDescription: string
+  
+  // Check exact force direction and choose appropriate point
+  if (Math.abs(force.y) > Math.abs(force.x) && Math.abs(force.y) > Math.abs(force.z)) {
+    // Primary Y direction
+    if (force.y > 0) {
+      // UP force (i key) -> apply from bottom center, but slightly inside the object
+      forceLocation = new Vector3(center.x, min.y + size.y * 0.1, center.z)
+      locationDescription = "UP force from bottom center"
+    } else {
+      // DOWN force (k key) -> apply from top center, but slightly inside the object
+      forceLocation = new Vector3(center.x, max.y - size.y * 0.1, center.z)
+      locationDescription = "DOWN force from top center"
+    }
+  } else if (Math.abs(force.x) > Math.abs(force.y) && Math.abs(force.x) > Math.abs(force.z)) {
+    // Primary X direction
+    if (force.x > 0) {
+      // RIGHT force (l key) -> apply from left center, but slightly inside the object
+      forceLocation = new Vector3(min.x + size.x * 0.1, center.y, center.z)
+      locationDescription = "RIGHT force from left center"
+    } else {
+      // LEFT force (j key) -> apply from right center, but slightly inside the object
+      forceLocation = new Vector3(max.x - size.x * 0.1, center.y, center.z)
+      locationDescription = "LEFT force from right center"
+    }
+  } else if (Math.abs(force.z) > Math.abs(force.x) && Math.abs(force.z) > Math.abs(force.y)) {
+    // Primary Z direction
+    if (force.z > 0) {
+      // FORWARD force (space key) -> apply from back center, but slightly inside the object
+      forceLocation = new Vector3(center.x, center.y, min.z + size.z * 0.1)
+      locationDescription = "FORWARD force from back center"
+    } else {
+      // BACKWARD force (b key) -> apply from front center, but slightly inside the object
+      forceLocation = new Vector3(center.x, center.y, max.z - size.z * 0.1)
+      locationDescription = "BACKWARD force from front center"
+    }
+  } else {
+    // Fallback to center
+    forceLocation = center.clone()
+    locationDescription = "Fallback to center"
+  }
+  
+  console.log(`Selected: ${locationDescription}`)
+  console.log(`Force location: (${forceLocation.x.toFixed(3)}, ${forceLocation.y.toFixed(3)}, ${forceLocation.z.toFixed(3)})`)
+  
+  return forceLocation
+}

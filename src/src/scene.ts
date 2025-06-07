@@ -1101,9 +1101,8 @@ function loadObjectIntoScene(object: Object3D, objectName: string) {
   objectScaleFactors.set(object, scaleFactor)
   
   dragableObjects.push(object)
-  
-  // Update drag controls
-  dragControls.deactivate()
+    // Update drag controls
+  dragControls.disconnect()
   dragControls = new DragControls(dragableObjects, camera, renderer.domElement)
   setupDragEventListeners()
   
