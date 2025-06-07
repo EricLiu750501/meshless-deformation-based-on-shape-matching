@@ -1742,15 +1742,15 @@ export function integratePhysics(
       forces[i].set(0, 0, 0)
       continue
     }
-    
-    // 計算彈性恢復力 (elasticity in C++)
+      // 計算彈性恢復力 (elasticity in C++)
     const elasticity = fullGoalPositions[i].clone().sub(positions[i]).multiplyScalar(alpha)
     
     // 計算外力加速度 (acceleration in C++)
     const acceleration = forces[i].clone().divideScalar(masses[i])
     
-    // C++ 積分公式：v = v + (elasticity/dt) + (dt * acceleration) - Rb_ * v
-    const elasticVelocityChange = elasticity.clone().divideScalar(dt)
+    // FIXED: 正確的積分公式 - 彈性恢復項已經包含了正確的時間尺度
+    // elasticity = (goalPos - currentPos) * (dt/tau), 不需要再除以dt
+    const elasticVelocityChange = elasticity
     const forceVelocityChange = acceleration.clone().multiplyScalar(dt)
     const dampingTerm = velocities[i].clone().multiplyScalar(dampingCoeff)
     
