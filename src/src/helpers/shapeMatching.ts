@@ -30,27 +30,38 @@ export interface ShapeMatchingParams {
 
 // 提取頂點
 function getVerticesFromObject(object: Object3D) : Vector3[] {
+    // Debug: Log object info
+    console.log("getVerticesFromObject - Processing object:", object);
     const vertices: Vector3[] = [];
-    // 如果物件是 Group，需要遍歷所有 children
     object.traverse((child) => {
         if (child instanceof Mesh) {
-            const geometry = child.geometry;
-
-            if (geometry instanceof BufferGeometry) {
-                const positionAttribute = geometry.attributes.position;
-
-                // 取得所有頂點
-                for (let i = 0; i < positionAttribute.count; i++) {
-                    const vertex = new Vector3(
-                        positionAttribute.getX(i),
-                        positionAttribute.getY(i),
-                        positionAttribute.getZ(i)
-                    );
-                    vertices.push(vertex);
+            const geometry = child.geometry as BufferGeometry;
+            if (!geometry.attributes.position) {
+                console.warn(`getVerticesFromObject: Mesh child '${child.name}' has no position attribute.`);
+                return;
+            }
+            const positionAttr = geometry.attributes.position;
+            // Debug: Log attribute info
+            if (positionAttr.count < 1 || positionAttr.itemSize !== 3) {
+                console.warn(`getVerticesFromObject: Invalid position attribute at mesh '${child.name}', count=${positionAttr.count}, itemSize=${positionAttr.itemSize}`);
+                return;
+            }
+            // Log a sample
+            console.log("Position attribute data sample:", {
+                array: Array.from(positionAttr.array).slice(0, 3),
+                itemSize: positionAttr.itemSize,
+                normalized: positionAttr.normalized
+            });
+            for (let i = 0; i < positionAttr.count; i++) {
+                const v = new Vector3();
+                v.fromBufferAttribute(positionAttr, i);
+                if (!isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z) ||
+                    isNaN(v.x) || isNaN(v.y) || isNaN(v.z)) {
+                    console.error(`Invalid vertex coordinates at index ${i}: x=${v.x}, y=${v.y}, z=${v.z}`);
+                    vertices.push(new Vector3(0, 0, 0));
+                } else {
+                    vertices.push(v);
                 }
-
-                // 顯示頂點
-                // console.log(vertices);
             }
         }
     });
@@ -62,32 +73,179 @@ export function getWorldVertices(mesh: Mesh): Vector3[] {
     const geometry = mesh.geometry as BufferGeometry;
     const positionAttr = geometry.attributes.position as BufferAttribute;
 
+    // Validate position attribute
+    if (!positionAttr) {
+        console.warn("Missing position attribute in mesh geometry");
+        return [];
+    }    // First, validate the mesh's transform matrix
+    // Force matrix world update to ensure we have current transformation
+    mesh.updateMatrixWorld(true);
+    
+    const matrix = mesh.matrixWorld;
+    let validMatrix = true;
+    
+    for (let j = 0; j < 16; j++) {
+        if (!isFinite(matrix.elements[j]) || isNaN(matrix.elements[j])) {
+            console.error(`Invalid matrix element at index ${j}: ${matrix.elements[j]}`);
+            validMatrix = false;
+            break;
+        }
+    }
+    
+    if (!validMatrix) {
+        console.error("Invalid transformation matrix detected for mesh, returning empty array");
+        return [];
+    }
+
+    // Also check mesh's position, scale, rotation
+    const pos = mesh.position;
+    const scale = mesh.scale;
+    const rotation = mesh.rotation;
+    
+    if (!isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z) ||
+        !isFinite(scale.x) || !isFinite(scale.y) || !isFinite(scale.z) ||
+        !isFinite(rotation.x) || !isFinite(rotation.y) || !isFinite(rotation.z)) {
+        console.error("Invalid mesh transform properties:", {
+            position: pos,
+            scale: scale,
+            rotation: rotation
+        });
+        return [];
+    }
+
     const vertices: Vector3[] = [];
     for (let i = 0; i < positionAttr.count; i++) {
-        const vertex = new Vector3().fromBufferAttribute(positionAttr, i);
-        mesh.localToWorld(vertex); // 轉成世界座標
-        vertices.push(vertex);
+        try {
+            const vertex = new Vector3().fromBufferAttribute(positionAttr, i);
+            
+            // Validate vertex before transformation
+            if (vertex.x === undefined || vertex.y === undefined || vertex.z === undefined) {
+                console.warn(`Vertex at index ${i} has undefined properties before transformation: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`);
+                vertices.push(new Vector3(0, 0, 0));
+                continue;
+            }
+            
+            if (!isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z) ||
+                isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
+                console.warn(`Invalid vertex before transformation at index ${i}: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`);
+                vertices.push(new Vector3(0, 0, 0));
+                continue;
+            }
+              // Debug: Log the vertex before transformation
+            if (i < 3) {
+                console.log(`getWorldVertices - Before transform vertex ${i}: (${vertex.x}, ${vertex.y}, ${vertex.z})`);
+                console.log(`Matrix elements before localToWorld:`, matrix.elements);
+            }
+            
+            // CRITICAL FIX: Check matrix elements before transformation
+            const hasInfiniteMatrix = matrix.elements.some(element => 
+                !isFinite(element) || isNaN(element) || element === Infinity || element === -Infinity
+            );
+            
+            if (hasInfiniteMatrix) {
+                console.error(`Matrix contains infinite values before localToWorld transformation at vertex ${i}:`, matrix.elements);
+                console.error(`Mesh details:`, {
+                    position: mesh.position,
+                    rotation: mesh.rotation,
+                    scale: mesh.scale,
+                    matrixWorld: mesh.matrixWorld.elements
+                });
+                // Reset the matrix to identity to prevent corruption
+                mesh.matrixWorld.identity();
+                mesh.position.set(0, 0, 0);
+                mesh.rotation.set(0, 0, 0);
+                mesh.scale.set(1, 1, 1);
+                mesh.updateMatrixWorld(true);
+                console.warn(`Reset corrupted matrix for mesh, using identity matrix`);
+            }
+            
+            mesh.localToWorld(vertex); // 轉成世界座標
+            
+            // Debug: Log the vertex after transformation
+            if (i < 3) {
+                console.log(`getWorldVertices - After transform vertex ${i}: (${vertex.x}, ${vertex.y}, ${vertex.z})`);
+            }
+            
+            // Validate vertex after transformation
+            if (vertex.x === undefined || vertex.y === undefined || vertex.z === undefined) {
+                console.warn(`Vertex at index ${i} has undefined properties after transformation: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`);
+                vertices.push(new Vector3(0, 0, 0));
+                continue;
+            }
+            
+            if (!isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z) ||
+                isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
+                console.warn(`Invalid vertex after transformation at index ${i}: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`);
+                vertices.push(new Vector3(0, 0, 0));
+                continue;
+            }
+            
+            vertices.push(vertex);
+        } catch (error) {
+            console.error(`Error processing vertex at index ${i}:`, error);
+            vertices.push(new Vector3(0, 0, 0));
+        }
     }
     return vertices;
 }
 
 export function getAllWorldVertices(object: Object3D): Vector3[] {
-    const worldVertices: Vector3[] = []
-
+    const vertices: Vector3[] = [];
     object.traverse((child) => {
         if (child instanceof Mesh) {
-            const geometry = child.geometry as BufferGeometry
-            const positionAttr = geometry.attributes.position as BufferAttribute
+            const geometry = child.geometry as BufferGeometry;
+            if (!geometry.attributes.position) {
+                console.warn(`getAllWorldVertices: Mesh child '${child.name}' has no position attribute.`);
+                return; // Skip this mesh
+            }
+            const positionAttribute = geometry.attributes.position;
 
-            for (let i = 0; i < positionAttr.count; i++) {
-                const vertex = new Vector3().fromBufferAttribute(positionAttr, i)
-                child.localToWorld(vertex)
-                worldVertices.push(vertex)
+            // Ensure matrixWorld is up-to-date
+            child.updateMatrixWorld(true);
+            const matrix = child.matrixWorld;
+
+            // Check for corrupted matrix
+            const hasInfiniteMatrix = matrix.elements.some(element =>
+                !isFinite(element) || isNaN(element) || element === Infinity || element === -Infinity
+            );
+
+            if (hasInfiniteMatrix) {
+                console.error(`getAllWorldVertices: Matrix for child '${child.name}' contains infinite/NaN values. Elements:`, matrix.elements);
+                // Add placeholder vertices if matrix is corrupt, then skip this child
+                for (let i = 0; i < positionAttribute.count; i++) {
+                    vertices.push(new Vector3(0, 0, 0));
+                }
+                return; // Skip further processing for this child
+            }
+
+            for (let i = 0; i < positionAttribute.count; i++) {
+                const localVertex = new Vector3();
+                // Read local vertex from buffer
+                localVertex.fromBufferAttribute(positionAttribute, i);
+
+                // Validate local vertex coordinates (before world transformation)
+                if (!isFinite(localVertex.x) || !isFinite(localVertex.y) || !isFinite(localVertex.z) ||
+                    isNaN(localVertex.x) || isNaN(localVertex.y) || isNaN(localVertex.z)) {
+                    console.error(`getAllWorldVertices: Invalid LOCAL vertex coordinates at index ${i} for child '${child.name}': (${localVertex.x}, ${localVertex.y}, ${localVertex.z}). Using (0,0,0) instead.`);
+                    vertices.push(new Vector3(0, 0, 0)); // Push a default valid vertex
+                    continue; // Skip to next vertex
+                }
+
+                // Transform local vertex to world coordinates
+                const worldVertex = localVertex.clone().applyMatrix4(matrix);
+
+                // Validate world vertex coordinates (after world transformation)
+                if (!isFinite(worldVertex.x) || !isFinite(worldVertex.y) || !isFinite(worldVertex.z) ||
+                    isNaN(worldVertex.x) || isNaN(worldVertex.y) || isNaN(worldVertex.z)) {
+                    console.error(`getAllWorldVertices: Invalid WORLD vertex coordinates at index ${i} for child '${child.name}' after transformation: (${worldVertex.x}, ${worldVertex.y}, ${worldVertex.z}). Using (0,0,0) instead.`);
+                    vertices.push(new Vector3(0, 0, 0)); // Push a default valid vertex
+                } else {
+                    vertices.push(worldVertex);
+                }
             }
         }
-    })
-
-    return worldVertices
+    });
+    return vertices;
 }
 
 /**
@@ -120,34 +278,120 @@ function calculateCentroidWithMasses(vertices: Vector3[], masses: number[]): Vec
         return new Vector3(0, 0, 0);
     }
 
+    // Debug: Log inputs
+    console.log("calculateCentroidWithMasses - Input validation:");
+    console.log(`vertices.length=${vertices.length}, masses.length=${masses.length}`);
+    for (let i = 0; i < Math.min(3, vertices.length); i++) {
+        const v = vertices[i];
+        const m = masses[i];
+        console.log(`Input ${i}: vertex=(${v.x}, ${v.y}, ${v.z}), mass=${m}`);
+    }
+
     const weightedSum = new Vector3();
     let totalMass = 0;
 
     for (let i = 0; i < vertices.length; i++) {
-        const weightedVertex = vertices[i].clone().multiplyScalar(masses[i]);
+        const vertex = vertices[i];
+        const mass = masses[i];
+        
+        // Validate vertex and mass
+        if (!vertex || !isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z) ||
+            isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
+            console.warn(`Invalid vertex at index ${i} in calculateCentroidWithMasses:`, vertex);
+            continue;
+        }
+        
+        if (!isFinite(mass) || isNaN(mass) || mass <= 0) {
+            console.warn(`Invalid mass at index ${i} in calculateCentroidWithMasses:`, mass);
+            continue;
+        }
+        
+        const weightedVertex = vertex.clone().multiplyScalar(mass);
         weightedSum.add(weightedVertex);
-        totalMass += masses[i];
+        totalMass += mass;
     }
 
     if (totalMass === 0) {
         // If all masses are zero, return simple centroid
+        console.warn("Total mass is zero, calculating simple centroid");
         const sum = new Vector3();
         for (let i = 0; i < vertices.length; i++) {
-            sum.add(vertices[i]);
+            const vertex = vertices[i];
+            if (vertex && isFinite(vertex.x) && isFinite(vertex.y) && isFinite(vertex.z)) {
+                sum.add(vertex);
+            }
         }
         return sum.divideScalar(vertices.length);
     }
 
-    return weightedSum.divideScalar(totalMass);
+    const result = weightedSum.divideScalar(totalMass);
+    
+    // Debug: Log result
+    console.log(`calculateCentroidWithMasses result: (${result.x}, ${result.y}, ${result.z}), totalMass=${totalMass}`);
+    
+    // Validate result
+    if (!isFinite(result.x) || !isFinite(result.y) || !isFinite(result.z) ||
+        isNaN(result.x) || isNaN(result.y) || isNaN(result.z)) {
+        console.error("Invalid centroid computed:", result);
+        return new Vector3(0, 0, 0);
+    }
+    
+    return result;
 }
 
 function calculateRelatedPosition(shape: Vector3[], centroid: Vector3): Vector3[] {
     const relatedPosition: Vector3[] = [];
 
-    // 遍歷每個頂點，並計算其相對於質心的位置
+    // Debug: Log inputs
+    console.log("calculateRelatedPosition - Input validation:");
+    console.log(`shape.length=${shape.length}, centroid=(${centroid.x}, ${centroid.y}, ${centroid.z})`);
+
+    // Validate inputs
+    if (!centroid || !isFinite(centroid.x) || !isFinite(centroid.y) || !isFinite(centroid.z) ||
+        isNaN(centroid.x) || isNaN(centroid.y) || isNaN(centroid.z)) {
+        console.error("Invalid centroid in calculateRelatedPosition:", centroid);
+        return shape.map(() => new Vector3(0, 0, 0));
+    }    // 遍歷每個頂點，並計算其相對於質心的位置
     for (let i = 0; i < shape.length; i++) {
         const vertex = shape[i];
+        
+        // Validate vertex - check for undefined properties first
+        if (!vertex) {
+            console.warn(`Null vertex at index ${i} in calculateRelatedPosition`);
+            relatedPosition.push(new Vector3(0, 0, 0));
+            continue;
+        }
+        
+        // Check if properties exist
+        if (vertex.x === undefined || vertex.y === undefined || vertex.z === undefined) {
+            console.warn(`Vertex at index ${i} has undefined properties: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`, vertex);
+            relatedPosition.push(new Vector3(0, 0, 0));
+            continue;
+        }
+        
+        // Check if properties are valid numbers
+        if (!isFinite(vertex.x) || !isFinite(vertex.y) || !isFinite(vertex.z) ||
+            isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
+            console.warn(`Invalid vertex at index ${i} in calculateRelatedPosition: x=${vertex.x}, y=${vertex.y}, z=${vertex.z}`, vertex);
+            relatedPosition.push(new Vector3(0, 0, 0));
+            continue;
+        }
+        
         const relativePos = vertex.clone().sub(centroid);
+        
+        // Debug: Log first few calculations
+        if (i < 3) {
+            console.log(`RelatedPosition ${i}: vertex=(${vertex.x}, ${vertex.y}, ${vertex.z}) - centroid=(${centroid.x}, ${centroid.y}, ${centroid.z}) = (${relativePos.x}, ${relativePos.y}, ${relativePos.z})`);
+        }
+        
+        // Validate result
+        if (!isFinite(relativePos.x) || !isFinite(relativePos.y) || !isFinite(relativePos.z) ||
+            isNaN(relativePos.x) || isNaN(relativePos.y) || isNaN(relativePos.z)) {
+            console.warn(`Invalid relative position computed at index ${i}:`, relativePos);
+            relatedPosition.push(new Vector3(0, 0, 0));
+            continue;
+        }
+        
         relatedPosition.push(relativePos);
     }
 
@@ -157,22 +401,64 @@ function calculateRelatedPosition(shape: Vector3[], centroid: Vector3): Vector3[
 
 // P is current RelatedPosition, Q is init RelatedPosition. 
 function calculateA_pq(p:Vector3[], q:Vector3[], masses:number[]):Matrix3 {
+    // Validate inputs
+    if (p.length !== q.length || p.length !== masses.length) {
+        console.warn("Mismatched array lengths in calculateA_pq, returning identity");
+        return new Matrix3().identity();
+    }
+    
+    if (p.length === 0) {
+        console.warn("Empty arrays in calculateA_pq, returning identity");
+        return new Matrix3().identity();
+    }      // Debug: Log the first few elements to see what's going on
+    console.log("Debug calculateA_pq - First 3 elements:");
+    for (let i = 0; i < Math.min(3, p.length); i++) {
+        console.log(`Index ${i}: p=(${p[i].x}, ${p[i].y}, ${p[i].z}), q=(${q[i].x}, ${q[i].y}, ${q[i].z}), mass=${masses[i]}`);
+    }
+    console.log(`Total elements: p.length=${p.length}, q.length=${q.length}, masses.length=${masses.length}`);
+    
     const A_pq = new Matrix3();
     for (let i = 0; i < p.length; i++) {
         const pi = p[i];
         const qi = q[i];
         const m = masses[i];
+        
+        // Validate individual vectors and mass
+        if (!isFinite(pi.x) || !isFinite(pi.y) || !isFinite(pi.z) ||
+            !isFinite(qi.x) || !isFinite(qi.y) || !isFinite(qi.z) ||
+            !isFinite(m) || isNaN(pi.x) || isNaN(pi.y) || isNaN(pi.z) ||
+            isNaN(qi.x) || isNaN(qi.y) || isNaN(qi.z) || isNaN(m)) {
+            console.warn(`Invalid data at index ${i} in calculateA_pq, skipping`);
+            continue;
+        }
+        
         // 外積
         const outerProduct = new Matrix3().set(
             qi.x * pi.x, qi.x * pi.y, qi.x * pi.z,
             qi.y * pi.x, qi.y * pi.y, qi.y * pi.z,
             qi.z * pi.x, qi.z * pi.y, qi.z * pi.z
-        ).multiplyScalar(m);        A_pq.elements.forEach((_, idx) => {
+        ).multiplyScalar(m);
+        
+        // Validate outer product before adding
+        const validOuterProduct = outerProduct.elements.every(val => isFinite(val) && !isNaN(val));
+        if (!validOuterProduct) {
+            console.warn(`Invalid outer product at index ${i} in calculateA_pq, skipping`);
+            continue;
+        }
+        
+        A_pq.elements.forEach((_, idx) => {
             A_pq.elements[idx] += outerProduct.elements[idx];
         });
     }
+    
+    // Final validation of result
+    const validResult = A_pq.elements.every(val => isFinite(val) && !isNaN(val));
+    if (!validResult) {
+        console.warn("Invalid result matrix in calculateA_pq, returning identity");
+        return new Matrix3().identity();
+    }
+    
     return A_pq;
-
 }
 
 function addMatrix3(a: Matrix3, b: Matrix3): Matrix3 {
@@ -352,6 +638,13 @@ function multiplyMatrix3x9_9x9(A: number[][], B: number[][]): number[][] {
  * Improved rotation extraction using SVD approximation
  */
 function extractRotationSVD(Apq: Matrix3): Matrix3 {
+    // Validate input matrix
+    const validInput = Apq.elements.every(val => isFinite(val) && !isNaN(val));
+    if (!validInput) {
+        console.warn("Invalid input matrix in extractRotationSVD, returning identity");
+        return new Matrix3().identity();
+    }
+    
     // Use iterative method to approximate SVD for better rotation extraction
     let R = Apq.clone();
     const maxIterations = 10;
@@ -362,11 +655,31 @@ function extractRotationSVD(Apq: Matrix3): Matrix3 {
         
         // Calculate (R*R^T)^(-1/2) using eigenvalue decomposition approximation
         const trace = RRt.elements[0] + RRt.elements[4] + RRt.elements[8];
+        
+        // Avoid division by zero or negative values
+        if (Math.abs(trace) < 1e-10) {
+            console.warn("Degenerate matrix in SVD iteration, returning identity");
+            return new Matrix3().identity();
+        }
+        
         const scale = Math.pow(Math.abs(trace / 3), -0.5);
+        
+        // Validate scale factor
+        if (!isFinite(scale) || isNaN(scale)) {
+            console.warn("Invalid scale factor in SVD iteration, returning identity");
+            return new Matrix3().identity();
+        }
         
         const RRtInvSqrt = RRt.clone().multiplyScalar(scale);
         
         const newR = new Matrix3().multiplyMatrices(R, RRtInvSqrt);
+        
+        // Validate new R matrix
+        const validNewR = newR.elements.every(val => isFinite(val) && !isNaN(val));
+        if (!validNewR) {
+            console.warn("Invalid matrix computed in SVD iteration, returning current R");
+            return R;
+        }
         
         // Check convergence
         const diff = new Matrix3();
@@ -378,6 +691,13 @@ function extractRotationSVD(Apq: Matrix3): Matrix3 {
         R = newR;
         
         if (diffNorm < 1e-6) break;
+    }
+    
+    // Final validation of result
+    const validResult = R.elements.every(val => isFinite(val) && !isNaN(val));
+    if (!validResult) {
+        console.warn("Invalid result from extractRotationSVD, returning identity");
+        return new Matrix3().identity();
     }
     
     return R;
@@ -469,13 +789,87 @@ function enhancedShapeMatching(
     masses: number[], 
     params: ShapeMatchingParams
 ) {
+    // Debug: Check targetVertices for NaN values
+    console.log("=== enhancedShapeMatching Debug ===");
+    console.log("targetVertices length:", targetVertices.length);
+    console.log("First 3 targetVertices (before coordinate conversion):");
+    for (let i = 0; i < Math.min(3, targetVertices.length); i++) {
+        const v = targetVertices[i];
+        console.log(`Target vertex ${i}: (${v.x}, ${v.y}, ${v.z})`);
+        if (!isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z) ||
+            isNaN(v.x) || isNaN(v.y) || isNaN(v.z)) {
+            console.error(`FOUND NaN in targetVertices at index ${i}:`, v);
+        }
+    }
+
+    // CRITICAL FIX: Convert target vertices to world coordinates to match currentVertices
+    // The issue was that targetVertices are in local coordinates but currentVertices are in world coordinates
+    const targetVerticesWorld: Vector3[] = [];
+    let vertexIndex = 0;
+    
+    object.traverse((child) => {
+        if (child instanceof Mesh) {
+            const geometry = child.geometry as BufferGeometry;
+            const positionAttr = geometry.attributes.position;
+              for (let i = 0; i < positionAttr.count; i++) {
+                if (vertexIndex < targetVertices.length) {
+                    const localVertex = targetVertices[vertexIndex].clone();
+                    
+                    // CRITICAL FIX: Check mesh matrix before localToWorld transformation
+                    child.updateMatrixWorld(true);
+                    const matrix = child.matrixWorld;
+                    
+                    const hasInfiniteMatrix = matrix.elements.some(element => 
+                        !isFinite(element) || isNaN(element) || element === Infinity || element === -Infinity
+                    );
+                    
+                    if (hasInfiniteMatrix) {
+                        console.error(`Matrix contains infinite values in enhancedShapeMatching at vertex ${vertexIndex}:`, matrix.elements);
+                        console.error(`Child mesh details:`, {
+                            position: child.position,
+                            rotation: child.rotation,  
+                            scale: child.scale
+                        });
+                        // Reset the matrix to identity to prevent corruption
+                        child.matrixWorld.identity();
+                        child.position.set(0, 0, 0);
+                        child.rotation.set(0, 0, 0);
+                        child.scale.set(1, 1, 1);
+                        child.updateMatrixWorld(true);
+                        console.warn(`Reset corrupted matrix in enhancedShapeMatching, using identity matrix`);
+                    }
+                    
+                    // Convert from local to world coordinates
+                    child.localToWorld(localVertex);
+                    
+                    // Validate the result
+                    if (!isFinite(localVertex.x) || !isFinite(localVertex.y) || !isFinite(localVertex.z) ||
+                        isNaN(localVertex.x) || isNaN(localVertex.y) || isNaN(localVertex.z)) {
+                        console.error(`Invalid world vertex after transformation at index ${vertexIndex}: (${localVertex.x}, ${localVertex.y}, ${localVertex.z})`);
+                        targetVerticesWorld.push(new Vector3(0, 0, 0));
+                    } else {
+                        targetVerticesWorld.push(localVertex);
+                    }
+                    
+                    vertexIndex++;
+                }
+            }
+        }
+    });
+
+    console.log("First 3 targetVertices (after world coordinate conversion):");
+    for (let i = 0; i < Math.min(3, targetVerticesWorld.length); i++) {
+        const v = targetVerticesWorld[i];
+        console.log(`World target vertex ${i}: (${v.x}, ${v.y}, ${v.z})`);
+    }
+
     const currentVertices = getAllWorldVertices(object);
     const numPoints = currentVertices.length;
 
-    if (targetVertices.length !== numPoints || masses.length !== numPoints) {
+    if (targetVerticesWorld.length !== numPoints || masses.length !== numPoints) {
         console.error("Vertex count mismatch:", {
             current: numPoints,
-            target: targetVertices.length,
+            target: targetVerticesWorld.length,
             masses: masses.length
         });
         return;
@@ -507,13 +901,11 @@ function enhancedShapeMatching(
     const movableIndices: number[] = [];
     const movableCurrentVertices: Vector3[] = [];
     const movableTargetVertices: Vector3[] = [];
-    const movableMasses: number[] = [];
-
-    for (let i = 0; i < numPoints; i++) {
+    const movableMasses: number[] = [];    for (let i = 0; i < numPoints; i++) {
         if (!fixedVertices.has(i)) {
             movableIndices.push(i);
             movableCurrentVertices.push(currentVertices[i].clone());
-            movableTargetVertices.push(targetVertices[i].clone());
+            movableTargetVertices.push(targetVerticesWorld[i].clone());
             movableMasses.push(masses[i]);
         }
     }
@@ -522,15 +914,26 @@ function enhancedShapeMatching(
     if (movableIndices.length === 0) {
         console.warn("No movable vertices found, skipping deformation");
         return;
-    }
-
-    // Calculate centroids based only on movable vertices
+    }    // Calculate centroids based only on movable vertices
     const movableCurrentCentroid = calculateCentroidWithMasses(movableCurrentVertices, movableMasses);
     const movableTargetCentroid = calculateCentroidWithMasses(movableTargetVertices, movableMasses);
+
+    // Debug: Log centroid values
+    console.log("Debug centroids:", {
+        currentCentroid: movableCurrentCentroid,
+        targetCentroid: movableTargetCentroid,
+        numMovableVertices: movableCurrentVertices.length
+    });
 
     // Compute relative positions for movable vertices only
     const p = calculateRelatedPosition(movableCurrentVertices, movableCurrentCentroid);
     const q = calculateRelatedPosition(movableTargetVertices, movableTargetCentroid);
+
+    // Debug: Log relative positions
+    console.log("Debug relative positions - First 3 elements:");
+    for (let i = 0; i < Math.min(3, p.length); i++) {
+        console.log(`Index ${i}: p=(${p[i].x}, ${p[i].y}, ${p[i].z}), q=(${q[i].x}, ${q[i].y}, ${q[i].z})`);
+    }
 
     // Safety check for degenerate configurations
     const pMagnitude = Math.sqrt(p.reduce((sum, v) => sum + v.lengthSq(), 0));
@@ -541,9 +944,7 @@ function enhancedShapeMatching(
         return;
     }
 
-    let movableNewVertices: Vector3[] = [];
-
-    try {
+    let movableNewVertices: Vector3[] = [];    try {
         switch (params.deformationType) {
             case 'rotation':
                 movableNewVertices = computeRotationDeformation(p, q, movableMasses, movableCurrentCentroid);
@@ -556,15 +957,69 @@ function enhancedShapeMatching(
                 break;
         }
 
-        // Validate computed vertices
+        // Validate computed vertices with fallback hierarchy
         const validVertices = movableNewVertices.every(v => 
             isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
             !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
-        );
-
-        if (!validVertices) {
-            console.error("Invalid vertices computed, skipping deformation");
-            return;
+        );        if (!validVertices) {
+            console.warn(`Invalid vertices in ${params.deformationType} deformation, trying fallback`);
+            
+            // Fallback hierarchy: quadratic -> linear -> rotation -> identity
+            if (params.deformationType === 'quadratic') {
+                console.log("Falling back to linear deformation");
+                movableNewVertices = computeLinearDeformation(p, q, movableMasses, movableCurrentCentroid, params.beta);
+                
+                // Validate linear fallback
+                const validLinearFallback = movableNewVertices.every(v => 
+                    isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+                    !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+                );
+                
+                if (!validLinearFallback) {
+                    console.log("Linear fallback failed, using rotation-only");
+                    movableNewVertices = computeRotationDeformation(p, q, movableMasses, movableCurrentCentroid);
+                    
+                    // Validate rotation fallback
+                    const validRotationFallback = movableNewVertices.every(v => 
+                        isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+                        !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+                    );
+                    
+                    if (!validRotationFallback) {
+                        console.log("Rotation fallback failed, using identity transformation");
+                        movableNewVertices = q.map(vertex => vertex.clone().add(movableCurrentCentroid));
+                    }
+                }
+            } else if (params.deformationType === 'linear') {
+                console.log("Falling back to rotation deformation");
+                movableNewVertices = computeRotationDeformation(p, q, movableMasses, movableCurrentCentroid);
+                
+                // Validate rotation fallback
+                const validRotationFallback = movableNewVertices.every(v => 
+                    isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+                    !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+                );
+                
+                if (!validRotationFallback) {
+                    console.log("Rotation fallback failed, using identity transformation");
+                    movableNewVertices = q.map(vertex => vertex.clone().add(movableCurrentCentroid));
+                }
+            } else {
+                // rotation deformation failed - use identity transformation
+                console.warn("Rotation deformation failed, using identity transformation");
+                movableNewVertices = q.map(vertex => vertex.clone().add(movableCurrentCentroid));
+            }
+            
+            // Final validation after all fallbacks
+            const finalValidation = movableNewVertices.every(v => 
+                isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+                !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+            );
+            
+            if (!finalValidation) {
+                console.error("All fallbacks failed, skipping deformation");
+                return;
+            }
         }
 
         // Reconstruct full vertex array with fixed vertices maintaining their positions
@@ -632,8 +1087,8 @@ function computeLinearDeformation(
         const mass = masses[i];
         const outerProduct = new Matrix3().set(
             qi.x * qi.x, qi.x * qi.y, qi.x * qi.z,
-            qi.y * qi.x, qi.y * qi.y, qi.y * qi.z,
-            qi.z * qi.x, qi.z * qi.y, qi.z * qi.z
+            qi.y * pi.x, qi.y * pi.y, qi.y * pi.z,
+            qi.z * pi.x, qi.z * pi.y, qi.z * pi.z
         ).multiplyScalar(mass);
         
         Aqq.elements.forEach((_, idx) => {
@@ -795,6 +1250,29 @@ function computeQuadraticDeformation(
 }
 
 function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFactor: number, fixedVertices?: Set<number>) {
+    // CRITICAL VALIDATION: Check input newVertices for infinite values before applying
+    const validNewVertices = newVertices.every(v => 
+        v && isFinite(v.x) && isFinite(v.y) && isFinite(v.z) &&
+        !isNaN(v.x) && !isNaN(v.y) && !isNaN(v.z)
+    );
+    
+    if (!validNewVertices) {
+        console.error("Invalid newVertices detected in applyDeformation, cannot apply deformation:");
+        newVertices.forEach((v, index) => {
+            if (!v || !isFinite(v.x) || !isFinite(v.y) || !isFinite(v.z) ||
+                isNaN(v.x) || isNaN(v.y) || isNaN(v.z)) {
+                console.error(`  Invalid vertex at index ${index}: (${v?.x}, ${v?.y}, ${v?.z})`);
+            }
+        });
+        return; // Skip deformation entirely
+    }
+    
+    // CRITICAL VALIDATION: Check dampingFactor
+    if (!isFinite(dampingFactor) || isNaN(dampingFactor) || dampingFactor < 0 || dampingFactor > 1) {
+        console.error(`Invalid dampingFactor: ${dampingFactor}, using default 0.1`);
+        dampingFactor = 0.1;
+    }
+    
     object.traverse((child) => {
         if (child instanceof Mesh) {
             const geometry = child.geometry;
@@ -802,68 +1280,91 @@ function applyDeformation(object: Object3D, newVertices: Vector3[], dampingFacto
                 const positionAttr = geometry.attributes.position;
                 const vertexCount = Math.min(newVertices.length, positionAttr.count);
                 
-                // Create a new position array for complete refresh
-                const newPositions = new Float32Array(positionAttr.count * 3);
-                
-                // Copy current positions first
-                for (let i = 0; i < positionAttr.count; i++) {
-                    newPositions[i * 3] = positionAttr.getX(i);
-                    newPositions[i * 3 + 1] = positionAttr.getY(i);
-                    newPositions[i * 3 + 2] = positionAttr.getZ(i);
-                }
-                
                 // Update only movable vertices
                 for (let i = 0; i < vertexCount; i++) {
                     // Skip fixed vertices
                     if (fixedVertices && fixedVertices.has(i)) {
                         continue;
                     }
-                    
+
                     const currentPos = new Vector3(
                         positionAttr.getX(i),
                         positionAttr.getY(i),
                         positionAttr.getZ(i)
                     );
-                    
+
                     // Convert new vertex from world to local space
-                    const targetPos = newVertices[i].clone();
+                    let targetPos = newVertices[i].clone();
+
+                    // CRITICAL FIX: Check matrix before worldToLocal transformation
+                    child.updateMatrixWorld(true);
+                    const matrix = child.matrixWorld;
+
+                    const hasInfiniteMatrix = matrix.elements.some(element =>
+                        !isFinite(element) || isNaN(element) || element === Infinity || element === -Infinity
+                    );
+
+                    if (hasInfiniteMatrix) {
+                        console.error(`Matrix contains infinite values in applyDeformation at vertex ${i}:`, matrix.elements);
+                        console.error(`Child mesh details:`, {
+                            position: child.position,
+                            rotation: child.rotation,
+                            scale: child.scale
+                        });
+                        // Reset the matrix to identity to prevent corruption
+                        child.matrixWorld.identity();
+                        child.position.set(0, 0, 0);
+                        child.rotation.set(0, 0, 0);
+                        child.scale.set(1, 1, 1);
+                        child.updateMatrixWorld(true);
+                        console.warn(`Reset corrupted matrix in applyDeformation, using identity matrix`);
+                    }
+
                     child.worldToLocal(targetPos);
-                    
+
                     // Validate target position
                     if (!isFinite(targetPos.x) || !isFinite(targetPos.y) || !isFinite(targetPos.z) ||
                         isNaN(targetPos.x) || isNaN(targetPos.y) || isNaN(targetPos.z)) {
-                        console.warn(`Invalid target position for vertex ${i}, skipping`);
-                        continue;
+                        console.warn(`Invalid target position for vertex ${i}, setting to (0,0,0)`);
+                        targetPos.set(0, 0, 0);
                     }
-                    
                     // Apply damping: interpolate between current and target position
-                    const dampedPos = currentPos.lerp(targetPos, Math.max(0, Math.min(1, dampingFactor)));
-                    
-                    // Validate damped position
+                    let dampedPos = currentPos.lerp(targetPos, Math.max(0, Math.min(1, dampingFactor)));
+
+                    // CRITICAL FIX: Validate all intermediate values before writing to position array
+                    if (!isFinite(currentPos.x) || !isFinite(currentPos.y) || !isFinite(currentPos.z) ||
+                        isNaN(currentPos.x) || isNaN(currentPos.y) || isNaN(currentPos.z)) {
+                        console.error(`Invalid current position for vertex ${i}: (${currentPos.x}, ${currentPos.y}, ${currentPos.z}), setting to (0,0,0)`);
+                        dampedPos = new Vector3(0, 0, 0);
+                    }
+
+                    if (!isFinite(targetPos.x) || !isFinite(targetPos.y) || !isFinite(targetPos.z) ||
+                        isNaN(targetPos.x) || isNaN(targetPos.y) || isNaN(targetPos.z)) {
+                        console.error(`Invalid target position for vertex ${i}: (${targetPos.x}, ${targetPos.y}, ${targetPos.z}), setting to (0,0,0)`);
+                        dampedPos = new Vector3(0, 0, 0);
+                    }
+
                     if (!isFinite(dampedPos.x) || !isFinite(dampedPos.y) || !isFinite(dampedPos.z) ||
                         isNaN(dampedPos.x) || isNaN(dampedPos.y) || isNaN(dampedPos.z)) {
-                        console.warn(`Invalid damped position for vertex ${i}, skipping`);
-                        continue;
+                        console.error(`Invalid damped position for vertex ${i}: (${dampedPos.x}, ${dampedPos.y}, ${dampedPos.z}), forcibly setting to (0,0,0)`);
+                        dampedPos = new Vector3(0, 0, 0);
                     }
-                    
-                    // Update in the new position array
-                    newPositions[i * 3] = dampedPos.x;
-                    newPositions[i * 3 + 1] = dampedPos.y;
-                    newPositions[i * 3 + 2] = dampedPos.z;
+
+                    // Final safety check before writing to position attribute
+                    const finalX = isFinite(dampedPos.x) ? dampedPos.x : 0;
+                    const finalY = isFinite(dampedPos.y) ? dampedPos.y : 0;
+                    const finalZ = isFinite(dampedPos.z) ? dampedPos.z : 0;
+
+                    // SAFETY: Use setXYZ instead of direct array assignment
+                    positionAttr.setXYZ(i, finalX, finalY, finalZ);
                 }
-                
-                // Complete refresh: replace the entire position array
-                positionAttr.array = newPositions;
+
                 positionAttr.needsUpdate = true;
-                
-                // Force geometry update
-                geometry.attributes.position = positionAttr;
                 geometry.computeBoundingSphere();
             }
         }
     });
 }
-
 
 
 

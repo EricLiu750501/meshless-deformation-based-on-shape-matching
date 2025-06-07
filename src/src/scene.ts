@@ -107,8 +107,7 @@ const simParams: SimulationParams = {
   beta: 0.3, // Reduced to favor rotation over linear/quadratic
   tau: 0.8,
   perturbation: 1e-4, // Increased for better numerical stability
-  dt: 0.016,
-  Famplitude: 0.05, // Reduced force amplitude for better control
+  dt: 0.016,  Famplitude: 0.1, // Increased slightly for better effect with scaled objects
   pickForce: 5, // Reduced picking force
   hasGravity: false,
   deformationType: 'rotation', // Start with the most stable deformation type
@@ -135,6 +134,10 @@ const fixedVertexMarkers: Mesh[] = []
 const initialVertices: Map<Object3D, Vector3[]> = new Map()
 const initialMasses: Map<Object3D, number[]> = new Map()
 const initialPositions: Map<Object3D, Vector3> = new Map()
+const objectScaleFactors: Map<Object3D, number> = new Map()
+
+// Auto-restore throttling
+let lastAutoRestoreLog = 0;
 
 // User input state
 const userInput = {
@@ -245,11 +248,10 @@ function init() {
     const cubeVerticesVec3: Vector3[] = []
     for (let i = 0; i < cubeVertices.length; i += 3) {
       cubeVerticesVec3.push(new Vector3(cubeVertices[i], cubeVertices[i + 1], cubeVertices[i + 2]))
-    }
-
-    initialVertices.set(cube, cubeVerticesVec3)
+    }    initialVertices.set(cube, cubeVerticesVec3)
     initialMasses.set(cube, cubeVerticesVec3.map(() => 1))
     initialPositions.set(cube, cube.position.clone())
+    objectScaleFactors.set(cube, 1) // Default cube has scale factor 1
 
     // Ground plane
     const gridTexture = createGridTexture()
@@ -327,8 +329,7 @@ function setupControls() {
     material.emissive.set('green')
   })
 
-  dragControls.addEventListener('hoveroff', (event) => {
-    const mesh = event.object as Mesh
+  dragControls.addEventListener('hoveroff', (event) => {    const mesh = event.object as Mesh
     const material = mesh.material as MeshStandardMaterial
     material.emissive.set('black')
   })
@@ -337,7 +338,7 @@ function setupControls() {
     const mesh = event.object as Mesh
     const material = mesh.material as MeshStandardMaterial
     cameraControls.enabled = false
-    animation.play = false
+    animation.play = true // Enable animation for dragging
     material.emissive.set('orange')
     material.opacity = 0.7
     material.needsUpdate = true
@@ -346,7 +347,7 @@ function setupControls() {
       showVertices(event.object)
     }
   })
-
+  
   dragControls.addEventListener('dragend', (event) => {
     cameraControls.enabled = true
     animation.play = true
@@ -357,16 +358,34 @@ function setupControls() {
     material.needsUpdate = true
 
     hideVertexMarkers()
+    
+    // Additional safeguard: clear picking state if it's still active
+    if (userInput.isPicking) {
+      console.log('Dragend detected while picking, clearing picking state')
+      userInput.isPicking = false
+      userInput.pickedVertexIndex = -1
+      if (userInput.draggedObject) {
+        userInput.draggedObject = null
+      }
+    }
+    
+    // Trigger auto restoration after drag ends with a delay
+    setTimeout(() => {
+      console.log('Drag ended, enabling auto restoration')
+      // Auto restoration will be handled by the animate loop since hasActiveForce will be false
+    }, 300) // Small delay to allow animation to settle
   })
-
   dragControls.addEventListener('drag', (event) => {
     if (simParams.showVertexMarkers) {
       updateVertexMarkers(event.object)
-    }    const initialVerts = initialVertices.get(event.object)
+    }
+    
+    const initialVerts = initialVertices.get(event.object)
     const initialPos = initialPositions.get(event.object)!
     const masses = initialMasses.get(event.object)
 
-    if (initialVerts && masses && initialPos) {      const shapeMatchingParams: ShapeMatchingParams = {
+    if (initialVerts && masses && initialPos) {
+      const shapeMatchingParams: ShapeMatchingParams = {
         deformationType: simParams.deformationType,
         beta: simParams.beta,
         tau: simParams.tau,
@@ -422,6 +441,24 @@ function setupGUI() {
       input.click()
     }
   }, 'loadOBJ').name('Load OBJ File')
+  
+  // Add preset object loading buttons
+  modelFolder.add({
+    loadCube: () => {
+      loadDefaultCube()
+    }
+  }, 'loadCube').name('Load Default Cube')
+    modelFolder.add({
+    loadTeapot: () => {
+      loadPresetOBJ('/teapot.obj')
+    }
+  }, 'loadTeapot').name('Load Teapot')
+  
+  modelFolder.add({
+    loadCubeOBJ: () => {
+      loadPresetOBJ('/cube.obj')
+    }
+  }, 'loadCubeOBJ').name('Load Cube OBJ')
 
   // Physics folder
   const physicsFolder = gui.addFolder('Physics')
@@ -441,26 +478,32 @@ function setupGUI() {
     'Linear': 'linear' as const,
     'Quadratic': 'quadratic' as const
   }
-  deformationFolder.add(simParams, 'deformationType', deformationTypes).name('Type')
-  // Visualization folder
+  deformationFolder.add(simParams, 'deformationType', deformationTypes).name('Type')  // Visualization folder
   const visualizationFolder = gui.addFolder('Visualization')
   visualizationFolder.add(simParams, 'showWireframe').name('Show Wireframe').onChange((value: boolean) => {
-    const material = cube.material as MeshStandardMaterial
-    material.wireframe = value
+    // Apply to all dragable objects, not just cube
+    dragableObjects.forEach(obj => {
+      obj.traverse((child) => {
+        if (child instanceof Mesh && child.material instanceof MeshStandardMaterial) {
+          child.material.wireframe = value
+        }
+      })
+    })
   })
   visualizationFolder.add(simParams, 'showVertexMarkers').name('Show Vertex Markers')
   visualizationFolder.add(simParams, 'showForceField').name('Show Force Field')
   visualizationFolder.add(simParams, 'showTriangles').name('Show Triangles').onChange((value: boolean) => {
-    // This shows the mesh structure - for now using wireframe
-    // In a more advanced implementation, this could show triangle edges as separate lines
-    if (cube) {
-      const material = cube.material as MeshStandardMaterial
-      // We differentiate from wireframe by showing both solid and wireframe
-      if (value) {
-        material.wireframe = false
-        // Could add a separate wireframe mesh here for better visualization
-      }
-    }
+    // Apply to all dragable objects
+    dragableObjects.forEach(obj => {
+      obj.traverse((child) => {
+        if (child instanceof Mesh && child.material instanceof MeshStandardMaterial) {
+          if (value) {
+            child.material.wireframe = false
+            // Could add a separate wireframe mesh here for better visualization
+          }
+        }
+      })
+    })
   })
   visualizationFolder.add(simParams, 'showBoundingBox').name('Show Bounding Box').onChange((value: boolean) => {
     // Will implement bounding box visibility logic here
@@ -480,15 +523,19 @@ function setupGUI() {
     console.log('Auto restore:', value ? 'enabled' : 'disabled')
   })
   simulationFolder.add(simParams, 'restoreSpeed', 0.001, 0.2).name('Restore Speed')
-  
-  simulationFolder.add({
+    simulationFolder.add({
     applyRandomForce: () => {
       const force = new Vector3(
         (Math.random() - 0.5) * simParams.Famplitude,
         (Math.random() - 0.5) * simParams.Famplitude,
         (Math.random() - 0.5) * simParams.Famplitude
       )
-      applyForceAndSimulate(cube, force)
+      // Apply to the first available object instead of hardcoded cube
+      if (dragableObjects.length > 0) {
+        applyForceAndSimulate(dragableObjects[0], force)
+      } else {
+        console.warn('No objects available to apply force to')
+      }
     }
   }, 'applyRandomForce').name('Apply Random Force')
 
@@ -542,16 +589,14 @@ function setupKeyboardControls() {
     userInput.isCtrlPressed = event.ctrlKey
 
     const key = event.key.toLowerCase()
-    
-    // Track force keys
-    if (['i', 'k', 'j', 'l', ' ', 'b'].includes(key)) {
+      // Track force keys
+    if (['i', 'k', 'j', 'l', ' ', 'b', 'r'].includes(key)) {
       userInput.activeKeys.add(key)
       userInput.hasActiveForce = true
     }
 
     // Force application keys (based on reference project)
-    switch (key) {
-      case 'i': // Up force
+    switch (key) {      case 'i': // Up force
         event.preventDefault()
         applyDirectionalForce(new Vector3(0, simParams.Famplitude, 0))
         showForceIndicator('UP')
@@ -581,9 +626,13 @@ function setupKeyboardControls() {
         applyDirectionalForce(new Vector3(0, 0, -simParams.Famplitude))
         showForceIndicator('BACKWARD')
         break
+      case 'r': // Reset all objects to original shape
+        event.preventDefault()
+        resetAllObjectsToOriginal()
+        showForceIndicator('RESET')
+        break
     }
   })
-
   window.addEventListener('keyup', (event) => {
     userInput.isShiftPressed = event.shiftKey
     userInput.isCtrlPressed = event.ctrlKey
@@ -593,7 +642,15 @@ function setupKeyboardControls() {
     // Remove from active keys and update force state
     if (userInput.activeKeys.has(key)) {
       userInput.activeKeys.delete(key)
-      userInput.hasActiveForce = userInput.activeKeys.size > 0
+    }
+    
+    // Clear hasActiveForce when no keys are active
+    userInput.hasActiveForce = userInput.activeKeys.size > 0
+    
+    // Additional safety check - clear force state completely when no force keys are pressed
+    if (userInput.activeKeys.size === 0) {
+      userInput.hasActiveForce = false
+      console.log('All force keys released, cleared hasActiveForce')
     }
     
     hideForceIndicator()
@@ -643,27 +700,66 @@ function handleCanvasClick(event: MouseEvent) {
   // Update raycaster
   raycaster.setFromCamera(mouse, camera)
   
-  // Find intersections with dragable objects
+  // Find intersections with dragable objects and their children
   const intersects = raycaster.intersectObjects(dragableObjects, true)
   
   if (intersects.length > 0) {
     const intersect = intersects[0]
-    const object = intersect.object
+    const clickedMesh = intersect.object
+    
+    // Find the parent dragable object
+    let parentObject: Object3D | null = null
+    for (const dragableObj of dragableObjects) {
+      if (dragableObj === clickedMesh || dragableObj.getObjectByProperty('uuid', clickedMesh.uuid)) {
+        parentObject = dragableObj
+        break
+      }
+    }
+    
+    if (!parentObject) {
+      console.warn('Could not find parent dragable object')
+      return
+    }
     
     if (userInput.isShiftPressed) {
-      // Fix/unfix vertex functionality
-      handleVertexFixing(object, intersect)
+      // Fix/unfix vertex functionality - pass parent object and intersect info
+      handleVertexFixing(parentObject, intersect)
     } else if (userInput.isCtrlPressed) {
-      // Start vertex picking
-      handleVertexPicking(object, intersect)
+      // Start vertex picking - pass the clicked mesh
+      handleVertexPicking(clickedMesh, intersect)
     }
   }
 }
 
-function handleVertexFixing(object: Object3D, intersect: any) {
-  if (intersect.face && object instanceof Mesh) {
+function calculateGlobalVertexIndex(parentObject: Object3D, targetMesh: Mesh, localVertexIndex: number): number {
+  let globalIndex = 0
+  let found = false
+  
+  parentObject.traverse((child) => {
+    if (child instanceof Mesh) {
+      const geometry = child.geometry as BufferGeometry
+      const positionAttr = geometry.attributes.position
+      
+      if (child === targetMesh) {
+        // Found the target mesh, add the local vertex index
+        globalIndex += localVertexIndex
+        found = true
+        return // Stop traversal
+      } else {
+        // Add all vertices from this mesh to the global index
+        globalIndex += positionAttr.count
+      }
+    }
+  })
+  
+  return found ? globalIndex : -1
+}
+
+function handleVertexFixing(parentObject: Object3D, intersect: any) {
+  if (intersect.face && intersect.object instanceof Mesh) {
     try {
-      const geometry = object.geometry as BufferGeometry
+      const mesh = intersect.object as Mesh
+      const geometry = mesh.geometry as BufferGeometry
       const position = geometry.attributes.position
       
       // Validate geometry and position attribute
@@ -672,8 +768,8 @@ function handleVertexFixing(object: Object3D, intersect: any) {
         return
       }
       
-      // Force update object's world matrix to ensure accurate transformations
-      object.updateMatrixWorld(true)
+      // Force update mesh's world matrix to ensure accurate transformations
+      mesh.updateMatrixWorld(true)
       
       // Get the closest vertex to the intersection point
       const vertices = [intersect.face.a, intersect.face.b, intersect.face.c]
@@ -692,10 +788,10 @@ function handleVertexFixing(object: Object3D, intersect: any) {
       const intersectionPoint = intersect.point.clone()
       
       // Safely invert the matrix with error checking
-      const worldMatrixInverse = object.matrixWorld.clone()
+      const worldMatrixInverse = mesh.matrixWorld.clone()
       const determinant = worldMatrixInverse.determinant()
       if (Math.abs(determinant) < 1e-10) {
-        console.warn('Object matrix is not invertible, using face center approach')
+        console.warn('Mesh matrix is not invertible, using face center approach')
         // Fallback: use the first vertex of the face
         closestVertex = validVertices[0]
       } else {
@@ -726,15 +822,22 @@ function handleVertexFixing(object: Object3D, intersect: any) {
         return
       }
       
-      // Toggle fixed state
-      if (fixedVertices.has(closestVertex)) {
-        fixedVertices.delete(closestVertex)
-        removeFixedVertexMarker(object, closestVertex)
-        console.log(`Vertex ${closestVertex} unfixed`)
+      // Calculate global vertex index for the parent object
+      const globalVertexIndex = calculateGlobalVertexIndex(parentObject, mesh, closestVertex)
+      if (globalVertexIndex === -1) {
+        console.warn('Could not calculate global vertex index')
+        return
+      }
+      
+      // Toggle fixed state using global index
+      if (fixedVertices.has(globalVertexIndex)) {
+        fixedVertices.delete(globalVertexIndex)
+        removeFixedVertexMarker(mesh, closestVertex)
+        console.log(`Vertex ${globalVertexIndex} (local: ${closestVertex}) unfixed`)
       } else {
-        fixedVertices.add(closestVertex)
-        addFixedVertexMarker(object, closestVertex)
-        console.log(`Vertex ${closestVertex} fixed`)
+        fixedVertices.add(globalVertexIndex)
+        addFixedVertexMarker(mesh, closestVertex)
+        console.log(`Vertex ${globalVertexIndex} (local: ${closestVertex}) fixed`)
       }
     } catch (error) {
       console.error('Error in handleVertexFixing:', error)
@@ -822,9 +925,11 @@ function addControlHints() {
     <strong>Controls:</strong><br>
     • Drag objects to move them<br>
     • Shift+Click: Fix/unfix vertices<br>
+    • Ctrl+Drag: Manipulate vertices (auto-restore on release)<br>
     • IJKL: Apply directional forces<br>
     • Space/B: Forward/backward forces<br>
-    • Double-click: Toggle fullscreen
+    • Double-click: Toggle fullscreen<br>
+    • R: Reset all objects to original shape
   `
   hintElement.style.position = 'absolute'
   hintElement.style.bottom = '10px'
@@ -846,36 +951,216 @@ function loadOBJFile(file: File) {
     if (content) {
       try {
         const object = objLoader.parse(content)
-        
-        // Remove existing objects from scene
-        dragableObjects.forEach(obj => scene.remove(obj))
-        dragableObjects.length = 0
-        
-        // Add new object
-        object.scale.set(0.01, 0.01, 0.01)
-        object.position.y = 0.5
-        scene.add(object)
-        
-        // Store object data
-        const vertices = getVerticesFromObject(object)
-        initialVertices.set(object, vertices)
-        initialMasses.set(object, vertices.map(() => 1))
-        initialPositions.set(object, object.position.clone())
-        
-        dragableObjects.push(object)
-        
-        // Update drag controls
-        dragControls.deactivate()
-        dragControls = new DragControls(dragableObjects, camera, renderer.domElement)
-        setupDragEventListeners()
-        
-        console.log(`Loaded OBJ: ${file.name}`)
+        loadObjectIntoScene(object, file.name)
       } catch (error) {
         console.error('Error loading OBJ file:', error)
       }
     }
   }
   reader.readAsText(file)
+}
+
+function loadPresetOBJ(url: string) {
+  objLoader.load(
+    url,
+    (object) => {
+      loadObjectIntoScene(object, url)
+    },
+    (progress) => {
+      console.log('Loading progress:', progress)
+    },
+    (error) => {
+      console.error('Error loading preset OBJ:', error)
+    }
+  )
+}
+
+function loadDefaultCube() {
+  // Clear existing objects
+  clearScene()
+  
+  // Recreate the default cube (same as in init)
+  const cubeVerticesInit = [
+    [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+    [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
+  ]
+
+  const positions = new Float32Array(cubeVerticesInit.flat())
+  const cubeGeometry = new BufferGeometry()
+  cubeGeometry.setAttribute('position', new BufferAttribute(positions, 3))
+
+  const indices = [
+    0, 1, 2, 0, 2, 3, // front
+    4, 6, 5, 4, 7, 6, // back
+    3, 2, 6, 3, 6, 7, // top
+    0, 5, 1, 0, 4, 5, // bottom
+    1, 5, 6, 1, 6, 2, // right
+    4, 0, 3, 4, 3, 7, // left
+  ]
+  cubeGeometry.setIndex(indices)
+  cubeGeometry.computeVertexNormals()
+
+  const material = new MeshStandardMaterial({
+    color: '#f69f1f',
+    metalness: 0.5,
+    roughness: 0.7,
+    side: DoubleSide,
+  })
+
+  const newCube = new Mesh(cubeGeometry, material)
+  loadObjectIntoScene(newCube, 'Default Cube')
+}
+
+function loadObjectIntoScene(object: Object3D, objectName: string) {
+  // Clear existing objects and state
+  clearScene()
+  
+  // Debug: Log the structure of the loaded object
+  console.log(`Loading object: ${objectName}`)
+  console.log(`Object type: ${object.constructor.name}`)
+  console.log(`Object children count: ${object.children.length}`)
+  
+  // Setup object properties
+  object.traverse((child) => {
+    if (child instanceof Mesh) {
+      console.log(`Found mesh: ${child.constructor.name} with ${child.geometry.attributes.position?.count || 0} vertices`)
+      
+      // Setup material if needed
+      if (!child.material) {
+        child.material = new MeshStandardMaterial({
+          color: '#f69f1f',
+          metalness: 0.5,
+          roughness: 0.7,
+          side: DoubleSide,
+        })
+      }
+      
+      // Ensure material is MeshStandardMaterial for consistency
+      if (!(child.material instanceof MeshStandardMaterial)) {
+        child.material = new MeshStandardMaterial({
+          color: '#f69f1f',
+          metalness: 0.5,
+          roughness: 0.7,
+          side: DoubleSide,
+        })
+      }
+      
+      // Enable shadows
+      child.castShadow = true
+      child.receiveShadow = true
+    }
+  })
+  
+  // Smart scaling based on object's bounding box
+  const box = new Box3().setFromObject(object)
+  const size = box.getSize(new Vector3())
+  const maxDimension = Math.max(size.x, size.y, size.z)
+  
+  // Target size: scale object so its largest dimension is around 1-2 units
+  const targetSize = 1.5
+  const scaleFactor = maxDimension > 0 ? targetSize / maxDimension : 1
+  
+  object.scale.set(scaleFactor, scaleFactor, scaleFactor)
+  
+  // Center the object and position it appropriately
+  const center = box.getCenter(new Vector3())
+  object.position.set(-center.x * scaleFactor, 0.5, -center.z * scaleFactor)
+  
+  console.log(`Object scaling info:`)
+  console.log(`  Original size: ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}`)
+  console.log(`  Max dimension: ${maxDimension.toFixed(2)}`)
+  console.log(`  Scale factor: ${scaleFactor.toFixed(4)}`)
+  console.log(`  Final size: ${(size.x * scaleFactor).toFixed(2)} x ${(size.y * scaleFactor).toFixed(2)} x ${(size.z * scaleFactor).toFixed(2)}`)
+    // Add to scene
+  scene.add(object)
+  
+  // Enhanced geometry computation for better meshless deformation
+  object.traverse((child) => {
+    if (child instanceof Mesh && child.geometry) {
+      // Compute bounding sphere for better physics simulation
+      child.geometry.computeBoundingSphere()
+      // Ensure vertex normals are computed for proper rendering
+      child.geometry.computeVertexNormals()
+      // Compute tangents if UV coordinates exist
+      if (child.geometry.attributes.uv) {
+        try {
+          child.geometry.computeTangents()
+        } catch (e) {
+          console.log('Could not compute tangents for mesh, continuing without them')
+        }
+      }
+      
+      console.log(`Enhanced mesh geometry computation completed for: ${child.constructor.name}`)
+      console.log(`  Bounding sphere radius: ${child.geometry.boundingSphere?.radius.toFixed(4) || 'N/A'}`)
+    }
+  })
+  
+  // Store object data for shape matching
+  const vertices = getVerticesFromObject(object)
+  initialVertices.set(object, vertices)
+  initialMasses.set(object, vertices.map(() => 1))
+  initialPositions.set(object, object.position.clone())
+  objectScaleFactors.set(object, scaleFactor)
+  
+  dragableObjects.push(object)
+  
+  // Update drag controls
+  dragControls.deactivate()
+  dragControls = new DragControls(dragableObjects, camera, renderer.domElement)
+  setupDragEventListeners()
+  
+  // Camera alignment - equivalent to C++ viewer.core().align_camera_center()
+  alignCameraToObject(object)
+  
+  // Enable animation system for meshless deformation
+  animation.enabled = true
+  animation.play = true
+  
+  // Update statistics immediately (C++ pattern: immediate stats update)
+  updateObjectStatistics(object, objectName)
+  
+  // Update global cube reference for compatibility
+  cube = object as Mesh
+  
+  console.log(`=== Successfully loaded object: ${objectName} ===`)
+  console.log(`Total vertices: ${vertices.length}`)
+  console.log(`Animation enabled: ${animation.enabled}`)
+  console.log(`Animation playing: ${animation.play}`)
+  console.log(`Object ready for meshless deformation with complete functionality`)
+  console.log(`  - Vertex fixing (Shift+Click): Ready`)
+  console.log(`  - Force application (IJKL keys): Ready`)
+  console.log(`  - Auto-restoration: Ready`)
+  console.log(`  - Shape matching: Ready`)
+  
+  // Align camera to the newly loaded object
+  alignCameraToObject(object)
+  
+  // Update object statistics in the GUI
+  updateObjectStatistics(object, objectName)
+}
+
+function clearScene() {
+  // Remove existing objects from scene
+  dragableObjects.forEach(obj => {
+    scene.remove(obj)
+    // Clean up object data
+    initialVertices.delete(obj)
+    initialMasses.delete(obj)
+    initialPositions.delete(obj)
+    objectScaleFactors.delete(obj)
+  })
+  dragableObjects.length = 0
+  
+  // Clear fixed vertices and their markers
+  fixedVertices.clear()
+  clearAllFixedVertexMarkers()
+  
+  // Clear regular vertex markers
+  hideVertexMarkers()
+  
+  // Reset animation state
+  animation.enabled = false
+  animation.play = false
 }
 
 function setupDragEventListeners() {
@@ -893,12 +1178,68 @@ function setupDragEventListeners() {
     }
   })
 
-  // Add other event listeners...
+  dragControls.addEventListener('dragstart', (event) => {
+    const mesh = event.object as Mesh
+    if (mesh.material instanceof MeshStandardMaterial) {
+      cameraControls.enabled = false
+      animation.play = false
+      mesh.material.emissive.set('orange')
+      mesh.material.opacity = 0.7
+      mesh.material.needsUpdate = true
+    }
+
+    if (simParams.showVertexMarkers) {
+      showVertices(event.object)
+    }
+  })
+
+  dragControls.addEventListener('dragend', (event) => {
+    const mesh = event.object as Mesh
+    if (mesh.material instanceof MeshStandardMaterial) {
+      cameraControls.enabled = true
+      animation.play = true
+      mesh.material.emissive.set('black')
+      mesh.material.opacity = 1
+      mesh.material.needsUpdate = true
+    }
+
+    hideVertexMarkers()
+  })
+
+  dragControls.addEventListener('drag', (event) => {
+    if (simParams.showVertexMarkers) {
+      updateVertexMarkers(event.object)
+    }
+    
+    const initialVerts = initialVertices.get(event.object)
+    const initialPos = initialPositions.get(event.object)
+    const masses = initialMasses.get(event.object)
+
+    if (initialVerts && masses && initialPos) {
+      const shapeMatchingParams: ShapeMatchingParams = {
+        deformationType: simParams.deformationType,
+        beta: simParams.beta,
+        tau: simParams.tau,
+        perturbation: simParams.perturbation,
+        dampingFactor: simParams.dampingFactor,
+        fixedVertices: fixedVertices
+      }
+      
+      enhancedShapeMatching(event.object, initialVerts, initialPos, masses, shapeMatchingParams)
+      if (simParams.showVertexMarkers) {
+        updateVertexMarkers(event.object)
+      }
+    }
+  })
+
+  dragControls.enabled = true
 }
 
 function applyDirectionalForce(force: Vector3) {
   if (dragableObjects.length > 0) {
     applyForceAndSimulate(dragableObjects[0], force)
+  } else {
+    console.warn('No objects available to apply directional force to')
   }
 }
 
@@ -910,34 +1251,46 @@ function animate() {
   // Update statistics
   updateStatistics()  // Physics simulation
   if (!simParams.pause && animation.enabled && animation.play) {
-    for (const object of dragableObjects) {
-      const initialVerts = initialVertices.get(object)
-      const initialPos = initialPositions.get(object)
-      const masses = initialMasses.get(object)
+    // Only apply shape matching if there are active forces or ongoing deformation
+    const hasActiveDeformation = userInput.hasActiveForce || userInput.isPicking || userInput.activeKeys.size > 0;
+    
+    if (hasActiveDeformation) {
+      for (const object of dragableObjects) {
+        const initialVerts = initialVertices.get(object)
+        const initialPos = initialPositions.get(object)
+        const masses = initialMasses.get(object)
 
-      if (initialVerts && initialPos && masses) {
-        // Create shape matching parameters from simulation parameters
-        const shapeMatchingParams: ShapeMatchingParams = {
-          deformationType: simParams.deformationType,
-          beta: simParams.beta,
-          tau: simParams.tau,
-          perturbation: simParams.perturbation,
-          dampingFactor: simParams.dampingFactor,
-          fixedVertices: fixedVertices
-        }
-        
-        enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
-        
-        // Force complete mesh refresh after shape matching
-        if (object instanceof Mesh) {
-          const geometry = object.geometry as BufferGeometry
-          geometry.computeBoundingSphere()
+        if (initialVerts && initialPos && masses) {
+          // Create shape matching parameters from simulation parameters
+          const shapeMatchingParams: ShapeMatchingParams = {
+            deformationType: simParams.deformationType,
+            beta: simParams.beta,
+            tau: simParams.tau,
+            perturbation: simParams.perturbation,
+            dampingFactor: simParams.dampingFactor,
+            fixedVertices: fixedVertices
+          }
+          
+          enhancedShapeMatching(object, initialVerts, initialPos, masses, shapeMatchingParams)
+          
+          // Force complete mesh refresh after shape matching
+          object.traverse((child) => {
+            if (child instanceof Mesh) {
+              const geometry = child.geometry as BufferGeometry
+              geometry.computeBoundingSphere()
+              geometry.computeVertexNormals()
+            }
+          })
         }
       }
+      
+      // Complete refresh of fixed vertex markers after deformation
+      updateFixedVertexMarkers()
+    } else {
+      // No active deformation - pause animation to save CPU
+      animation.play = false
+      console.log('No active deformation detected, pausing animation loop')
     }
-    
-    // Complete refresh of fixed vertex markers after deformation
-    updateFixedVertexMarkers()
   }
     // Apply auto restoration when simulation is paused or not active
   applyAutoRestore()
@@ -960,12 +1313,149 @@ function animate() {
   stats.end()
 }
 
+// Camera alignment function - equivalent to viewer.core().align_camera_center()
+function alignCameraToObject(object: Object3D) {
+  const box = new Box3().setFromObject(object)
+  const center = box.getCenter(new Vector3())
+  const size = box.getSize(new Vector3())
+  
+  // Calculate optimal camera distance based on object size
+  const maxDimension = Math.max(size.x, size.y, size.z)
+  const fov = camera.fov * (Math.PI / 180)
+  const cameraDistance = maxDimension / (2 * Math.tan(fov / 2)) * 1.5
+  
+  // Position camera to view the object optimally
+  camera.position.set(
+    center.x + cameraDistance,
+    center.y + cameraDistance * 0.5,
+    center.z + cameraDistance
+  )
+  
+  // Make camera look at the object center
+  camera.lookAt(center)
+  camera.updateProjectionMatrix()
+  
+  // Update orbit controls target
+  cameraControls.target.copy(center)
+  cameraControls.update()
+  
+  console.log(`Camera aligned to object center: (${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`)
+  console.log(`Camera distance: ${cameraDistance.toFixed(2)}`)
+}
+
+// Reset all objects to their original shape and position
+function resetAllObjectsToOriginal() {
+  console.log('Resetting all objects to original shape...')
+  
+  dragableObjects.forEach(object => {
+    restoreOriginalShape(object)
+  })
+  
+  // Clear all fixed vertices
+  fixedVertices.clear()
+  clearAllFixedVertexMarkers()
+  
+  // Reset user input state
+  userInput.hasActiveForce = false
+  userInput.activeKeys.clear()
+  userInput.isPicking = false
+  userInput.pickedVertexIndex = -1
+  userInput.draggedObject = null
+  
+  // Update statistics
+  if (dragableObjects.length > 0) {
+    updateObjectStatistics(dragableObjects[0], 'Reset Object')
+  }
+  
+  console.log('All objects reset to original state')
+}
+
+function updateObjectStatistics(object: Object3D, objectName: string) {
+  let totalVertices = 0
+  let totalTriangles = 0
+  let totalMemory = 0
+  
+  object.traverse((child) => {
+    if (child instanceof Mesh && child.geometry) {
+      const geometry = child.geometry
+      const vertexCount = geometry.attributes.position?.count || 0
+      const indexCount = geometry.index?.count || 0
+      const triangleCount = indexCount > 0 ? indexCount / 3 : vertexCount / 3
+      
+      totalVertices += vertexCount
+      totalTriangles += triangleCount
+      
+      // Estimate memory usage (simplified calculation)
+      const positionArray = geometry.attributes.position?.array
+      const normalArray = geometry.attributes.normal?.array
+      const uvArray = geometry.attributes.uv?.array
+      const indexArray = geometry.index?.array
+      
+      let meshMemory = 0
+      if (positionArray) meshMemory += positionArray.length * 4 // Float32 = 4 bytes
+      if (normalArray) meshMemory += normalArray.length * 4
+      if (uvArray) meshMemory += uvArray.length * 4
+      if (indexArray) meshMemory += indexArray.length * 2 // Uint16 = 2 bytes typically
+      
+      totalMemory += meshMemory
+    }
+  })
+    // Update global statistics
+  simParams.vertices = totalVertices
+  simParams.triangles = Math.floor(totalTriangles)
+  simParams.memoryUsage = totalMemory
+  
+  // Update GUI display statistics
+  statsDisplay.vertices = totalVertices.toString()
+  statsDisplay.triangles = Math.floor(totalTriangles).toString()
+  statsDisplay.memory = (totalMemory / 1024).toFixed(2) + ' KB'
+  
+  console.log(`=== Object Statistics for ${objectName} ===`)
+  console.log(`Vertices: ${totalVertices}`)
+  console.log(`Triangles: ${Math.floor(totalTriangles)}`)
+  console.log(`Memory usage: ${(totalMemory / 1024).toFixed(2)} KB`)
+  console.log(`Scale factor: ${objectScaleFactors.get(object)?.toFixed(4) || 'N/A'}`)
+    // Refresh GUI controllers if they exist
+  if (gui) {
+    // GUI will automatically reflect the updated simParams values
+    console.log('GUI statistics updated')
+  }
+}
+
 function updateStatistics() {
   statsDisplay.fps = Math.round(1 / clock.getDelta()).toString()
-  statsDisplay.vertices = dragableObjects.reduce((total, obj) => {
-    const vertices = getVerticesFromObject(obj)
-    return total + vertices.length
-  }, 0).toString()
+  
+  let totalVertices = 0;
+  try {
+    totalVertices = dragableObjects.reduce((total, obj) => {
+      // Validate object before processing
+      if (!obj || !obj.position || !obj.scale || !obj.rotation) {
+        console.warn("Invalid object found in dragableObjects, skipping");
+        return total;
+      }
+      
+      // Check for invalid transforms
+      if (!isFinite(obj.position.x) || !isFinite(obj.position.y) || !isFinite(obj.position.z) ||
+          !isFinite(obj.scale.x) || !isFinite(obj.scale.y) || !isFinite(obj.scale.z) ||
+          !isFinite(obj.rotation.x) || !isFinite(obj.rotation.y) || !isFinite(obj.rotation.z)) {
+        console.warn("Object with invalid transform found, skipping vertex count");
+        return total;
+      }
+      
+      try {
+        const vertices = getVerticesFromObject(obj);
+        return total + vertices.length;
+      } catch (error) {
+        console.error("Error getting vertices from object:", error);
+        return total;
+      }
+    }, 0);
+  } catch (error) {
+    console.error("Error in vertex counting:", error);
+    totalVertices = 0;
+  }
+  
+  statsDisplay.vertices = totalVertices.toString();
   statsDisplay.triangles = '0' // TODO: Calculate triangles
   
   // Safe memory usage check
@@ -1046,8 +1536,35 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
   const initialVerts = initialVertices.get(object)
   const initialPos = initialPositions.get(object)
   const masses = initialMasses.get(object)
+  const scaleFactor = objectScaleFactors.get(object) || 1
 
-  if (!initialVerts || !initialPos || !masses) return
+  console.log(`=== applyForceAndSimulate Debug ===`)
+  console.log(`Object:`, object.constructor.name)
+  console.log(`Initial vertices found:`, !!initialVerts, initialVerts?.length || 0)
+  console.log(`Initial position found:`, !!initialPos)
+  console.log(`Masses found:`, !!masses, masses?.length || 0)
+  console.log(`Scale factor:`, scaleFactor)
+
+  if (!initialVerts || !initialPos || !masses) {
+    console.error('Missing required data for force application!')
+    console.error('initialVerts:', !!initialVerts)
+    console.error('initialPos:', !!initialPos) 
+    console.error('masses:', !!masses)
+    
+    // Clear active force state when force application fails
+    userInput.hasActiveForce = false
+    userInput.activeKeys.clear()
+    console.log('Cleared hasActiveForce due to missing data')
+    return
+  }
+
+  // Adjust force based on object scale to prevent objects from flying away
+  // Smaller objects (smaller scale factor) need proportionally smaller forces
+  const adjustedForce = force.clone().multiplyScalar(scaleFactor)
+  
+  console.log(`Applying force with scale factor ${scaleFactor.toFixed(4)}`)
+  console.log(`Original force magnitude: ${force.length().toFixed(4)}`)
+  console.log(`Adjusted force magnitude: ${adjustedForce.length().toFixed(4)}`)
 
   if (simParams.showVertexMarkers) {
     showVertices(object)
@@ -1080,10 +1597,9 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
           if (fixedVertices.has(randomVertexIndex)) {
             continue
           }
-          
-          const vertex = new Vector3().fromBufferAttribute(positionAttr, randomVertexIndex)
+            const vertex = new Vector3().fromBufferAttribute(positionAttr, randomVertexIndex)
 
-          const vertexForce = force.clone().multiplyScalar(0.8 + Math.random() * 0.4)
+          const vertexForce = adjustedForce.clone().multiplyScalar(0.8 + Math.random() * 0.4)
           vertex.add(vertexForce)
 
           // Update in the new position array
@@ -1107,12 +1623,20 @@ function applyForceAndSimulate(object: Object3D, force: Vector3) {
   if (simParams.showVertexMarkers) {
     updateVertexMarkers(object)
   }
-
   // Complete refresh of fixed vertex markers to prevent residual images
   updateFixedVertexMarkers()
-
   animation.enabled = true
   animation.play = true
+  
+  console.log('Force applied - restarting animation for deformation processing')
+  
+  // Clear active force state after successful force application
+  // Use setTimeout to allow a brief delay before auto-restore can begin
+  setTimeout(() => {
+    userInput.hasActiveForce = false
+    userInput.activeKeys.clear()
+    console.log('Cleared hasActiveForce after force application completed')
+  }, 100) // 100ms delay to prevent immediate restoration
 }
 
 function handleMouseMove(event: MouseEvent) {
@@ -1152,20 +1676,27 @@ function handleMouseMove(event: MouseEvent) {
       position.setXYZ(userInput.pickedVertexIndex, currentVertex.x, currentVertex.y, currentVertex.z)
       position.needsUpdate = true
       
-      // Trigger shape matching
+      // Trigger shape matching with error handling
       const initialVerts = initialVertices.get(userInput.draggedObject)
       const initialPos = initialPositions.get(userInput.draggedObject)
       const masses = initialMasses.get(userInput.draggedObject)
-        if (initialVerts && initialPos && masses) {        const shapeMatchingParams: ShapeMatchingParams = {
-          deformationType: simParams.deformationType,
-          beta: simParams.beta,
-          tau: simParams.tau,
-          perturbation: simParams.perturbation,
-          dampingFactor: simParams.dampingFactor,
-          fixedVertices: fixedVertices
+      
+      if (initialVerts && initialPos && masses) {
+        try {
+          const shapeMatchingParams: ShapeMatchingParams = {
+            deformationType: simParams.deformationType,
+            beta: simParams.beta,
+            tau: simParams.tau,
+            perturbation: simParams.perturbation,
+            dampingFactor: simParams.dampingFactor,
+            fixedVertices: fixedVertices
+          }
+          
+          enhancedShapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, shapeMatchingParams)
+        } catch (error) {
+          console.warn('Shape matching failed during vertex dragging:', error)
+          // Continue with the operation - the vertex position has already been updated
         }
-        
-        enhancedShapeMatching(userInput.draggedObject, initialVerts, initialPos, masses, shapeMatchingParams)
       }
     }
   }
@@ -1174,13 +1705,13 @@ function handleMouseMove(event: MouseEvent) {
 function updateBoundingBoxVisibility(visible: boolean) {
   if (visible) {
     // Create bounding box helper if it doesn't exist
-    if (!boundingBoxHelper && cube) {
-      const box = new Box3().setFromObject(cube)
+    if (!boundingBoxHelper && dragableObjects.length > 0) {
+      const box = new Box3().setFromObject(dragableObjects[0])
       boundingBoxHelper = new Box3Helper(box, 0xffff00) // Yellow color
       scene.add(boundingBoxHelper)
-    } else if (boundingBoxHelper && cube) {
+    } else if (boundingBoxHelper && dragableObjects.length > 0) {
       // Update bounding box to current object state
-      const box = new Box3().setFromObject(cube)
+      const box = new Box3().setFromObject(dragableObjects[0])
       ;(boundingBoxHelper as Box3Helper).box.copy(box)
       boundingBoxHelper.visible = true
     }
@@ -1191,15 +1722,24 @@ function updateBoundingBoxVisibility(visible: boolean) {
 
 function handleMouseUp(_event: MouseEvent) {
   if (userInput.isPicking) {
+    console.log('Mouse up detected during picking, cleaning up state')
+    
+    // Always reset picking state first
     userInput.isPicking = false
     userInput.pickedVertexIndex = -1
-    userInput.hasActiveForce = false // Clear active force when releasing mouse
     
     // Restore original shape when mouse is released
     if (userInput.draggedObject) {
       restoreOriginalShape(userInput.draggedObject)
       userInput.draggedObject = null
     }
+    
+    // Clear active force with small delay to allow restoration to complete
+    setTimeout(() => {
+      userInput.hasActiveForce = false
+      userInput.activeKeys.clear()
+      console.log('Ended vertex picking and cleared hasActiveForce after delay')
+    }, 200) // 200ms delay for Ctrl+drag operations
     
     cameraControls.enabled = true
     console.log('Ended vertex picking and restored original shape')
@@ -1208,66 +1748,172 @@ function handleMouseUp(_event: MouseEvent) {
 
 function restoreOriginalShape(object: Object3D) {
   const originalVertices = initialVertices.get(object)
-  if (!originalVertices || !(object instanceof Mesh)) {
+  
+  if (!originalVertices) {
     console.warn('No original vertices found for object')
     return
   }
   
-  const geometry = object.geometry as BufferGeometry
-  const positionAttr = geometry.attributes.position
+  console.log('Restoring original shape (preserving position)...')
   
-  // Restore original vertex positions
-  for (let i = 0; i < Math.min(originalVertices.length, positionAttr.count); i++) {
-    const originalVertex = originalVertices[i]
-    positionAttr.setXYZ(i, originalVertex.x, originalVertex.y, originalVertex.z)
-  }
-  
-  positionAttr.needsUpdate = true
-    // Update fixed vertex markers to match restored positions
+  // Handle complex objects with multiple meshes - restore shape only
+  object.traverse((child) => {
+    if (child instanceof Mesh) {
+      const geometry = child.geometry as BufferGeometry
+      const positionAttr = geometry.attributes.position
+      let vertexOffset = 0
+
+      // Calculate vertex offset for this mesh within the parent object
+      const parent = child.parent
+      if (parent && parent !== object) {
+        parent.children.forEach((sibling) => {
+          if (sibling === child) return
+          if (sibling instanceof Mesh) {
+            const siblingGeometry = sibling.geometry as BufferGeometry
+            vertexOffset += siblingGeometry.attributes.position.count
+          }
+        })
+      }
+
+      // Restore original vertex positions (shape only, not object position)
+      for (let i = 0; i < positionAttr.count; i++) {
+        const globalVertexIndex = vertexOffset + i
+        
+        if (globalVertexIndex < originalVertices.length) {
+          const originalVertex = originalVertices[globalVertexIndex].clone()
+          
+          // Use original vertex position directly in object's local space
+          // No matrix transformations needed for shape restoration
+          positionAttr.setXYZ(i, originalVertex.x, originalVertex.y, originalVertex.z)
+        }
+      }
+      
+      positionAttr.needsUpdate = true
+      geometry.computeBoundingSphere()
+      geometry.computeVertexNormals()
+    }
+  })
+
+  // DO NOT restore object position - only restore the shape
+  // The object should remain where the user positioned it
+
+  // Update fixed vertex markers to match restored positions
   updateVertexMarkers(object)
+  updateFixedVertexMarkers()
   
-  console.log('Original shape restored')
+  console.log('Original shape restored (position preserved):', object.name || 'unnamed')
 }
 
 // Auto restoration function - gradually restore shape when no forces are applied
 function applyAutoRestore() {
+  const now = performance.now();
+  const shouldLog = now - lastAutoRestoreLog > 2000; // Log every 2 seconds max
+  
+  if (shouldLog) {
+    console.log(`=== Auto Restore Check ===`)
+    console.log(`simParams.autoRestore: ${simParams.autoRestore}`)
+    console.log(`userInput.hasActiveForce: ${userInput.hasActiveForce}`)
+    console.log(`userInput.isPicking: ${userInput.isPicking}`)
+    console.log(`userInput.activeKeys size: ${userInput.activeKeys.size}`)
+    console.log(`dragableObjects length: ${dragableObjects.length}`)
+    lastAutoRestoreLog = now;
+  }
+  
   if (!simParams.autoRestore || userInput.hasActiveForce || userInput.isPicking) {
+    if (shouldLog) {
+      console.log('Skipping auto restore:', {
+        autoRestore: simParams.autoRestore,
+        hasActiveForce: userInput.hasActiveForce,
+        isPicking: userInput.isPicking,
+        activeKeysSize: userInput.activeKeys.size,
+        activeKeys: Array.from(userInput.activeKeys)
+      })
+    }
     return // Skip auto restore if disabled or forces are active
   }
-
-  dragableObjects.forEach(object => {
+  
+  if (shouldLog) {
+    console.log('✅ Auto restore conditions met - proceeding with restoration')
+  }
+    dragableObjects.forEach((object, index) => {
     const originalVertices = initialVertices.get(object)
-    if (!originalVertices || !(object instanceof Mesh)) {
+    
+    if (!originalVertices) {
+      if (shouldLog) {
+        console.log(`❌ No original vertices found for object ${index}:`, object.constructor.name)
+      }
       return
     }
 
-    const geometry = object.geometry as BufferGeometry
-    const positionAttr = geometry.attributes.position
-    let hasChanges = false
+    if (shouldLog) {
+      console.log(`🔧 Restoring object ${index} with ${originalVertices.length} original vertices`)
+    }
 
-    // Gradually move each vertex towards its original position
-    for (let i = 0; i < Math.min(originalVertices.length, positionAttr.count); i++) {
-      const currentPos = new Vector3(
-        positionAttr.getX(i),
-        positionAttr.getY(i),
-        positionAttr.getZ(i)
-      )
-      
-      const originalPos = originalVertices[i].clone()
-      
-      // Check if the vertex is significantly displaced
-      const distance = currentPos.distanceTo(originalPos)
-      if (distance > 0.001) { // Only apply restoration if vertex is displaced
-        // Gradually move towards original position
-        const restoredPos = currentPos.lerp(originalPos, simParams.restoreSpeed)
-        positionAttr.setXYZ(i, restoredPos.x, restoredPos.y, restoredPos.z)
-        hasChanges = true
+    // Handle mesh objects (including complex OBJ files with multiple meshes)
+    object.traverse((child) => {
+      if (child instanceof Mesh) {
+        const geometry = child.geometry as BufferGeometry
+        const positionAttr = geometry.attributes.position
+        let hasChanges = false
+        let vertexOffset = 0// Calculate vertex offset for this mesh within the parent object
+        const parent = child.parent
+        if (parent && parent !== object) {
+          // Find all previous mesh siblings to calculate offset
+          parent.children.forEach((sibling) => {
+            if (sibling === child) return // Stop when we reach current child
+            if (sibling instanceof Mesh) {
+              const siblingGeometry = sibling.geometry as BufferGeometry
+              vertexOffset += siblingGeometry.attributes.position.count
+            }
+          })
+        }
+
+        // Gradually move each vertex towards its original position
+        for (let i = 0; i < positionAttr.count; i++) {
+          const globalVertexIndex = vertexOffset + i
+          
+          // Skip if this vertex doesn't have original data
+          if (globalVertexIndex >= originalVertices.length) {
+            continue
+          }
+
+          // Skip fixed vertices
+          if (fixedVertices.has(globalVertexIndex)) {
+            continue
+          }
+
+          const currentPos = new Vector3(
+            positionAttr.getX(i),
+            positionAttr.getY(i),
+            positionAttr.getZ(i)
+          )
+            // Get original position directly - it's already in the correct local space
+          const originalPos = originalVertices[globalVertexIndex].clone()
+          
+          // Check if the vertex is significantly displaced from its original shape
+          const distance = currentPos.distanceTo(originalPos)
+          if (distance > 0.001) { // Only apply restoration if vertex is displaced
+            // Gradually move towards original position with adaptive restore speed
+            const adaptiveRestoreSpeed = Math.min(simParams.restoreSpeed * (1 + distance), 0.1)
+            const restoredPos = currentPos.lerp(originalPos, adaptiveRestoreSpeed)
+            
+            // Validate restored position
+            if (isFinite(restoredPos.x) && isFinite(restoredPos.y) && isFinite(restoredPos.z)) {
+              positionAttr.setXYZ(i, restoredPos.x, restoredPos.y, restoredPos.z)
+              hasChanges = true
+            }
+          }
+        }
+
+        // Update geometry if changes were made
+        if (hasChanges) {
+          positionAttr.needsUpdate = true
+          geometry.computeBoundingSphere()
+          geometry.computeVertexNormals()
+        }
       }
-    }
-
-    if (hasChanges) {
-      positionAttr.needsUpdate = true
-    }
+    })    // Note: We do NOT restore object position here - only shape
+    // The object position should remain where the user moved it
   })
 }
 
